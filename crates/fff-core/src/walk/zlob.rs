@@ -2,7 +2,7 @@
 //! Active when the `zlob` feature is enabled (requires the Zig toolchain).
 
 use crate::file_picker::is_known_binary_extension_basename;
-use crate::ignore::IGNORED_DIRS;
+use crate::ignore::{CACHE_DIRS, IGNORED_DIRS};
 use crate::types::FileItem;
 use crate::walk::{WalkIgnoreRules, WalkOutput};
 use std::path::Path;
@@ -17,12 +17,16 @@ pub(crate) fn walk_collect_files(
     base_path: &Path,
     is_git_repo: bool,
     follow_symlinks: bool,
+    respect_ignore_files: bool,
     threads: usize,
     synced_files_count: &Arc<AtomicUsize>,
 ) -> crate::Result<WalkOutput> {
-    // gitignore on; skip hidden on non-git roots (so `~/` doesn't recurse into
-    // ~/.cache, ~/.config, etc.); optionally follow symlinks.
-    let mut flags = WalkFlags::GITIGNORE;
+    // Skip hidden files on non-git roots and optionally follow symlinks.
+    let mut flags = if respect_ignore_files {
+        WalkFlags::GITIGNORE
+    } else {
+        WalkFlags::empty()
+    };
     if !is_git_repo {
         flags |= WalkFlags::SKIP_HIDDEN;
     }
@@ -38,9 +42,19 @@ pub(crate) fn walk_collect_files(
         // Bulk-fetch the only metadata FileItem needs; zlob never stats more.
         .metadata(WalkMetadata::SIZE | WalkMetadata::MTIME);
 
-    if !is_git_repo
-        && !IGNORED_DIRS.is_empty()
-        && let Err(e) = builder.extra_ignore(IGNORED_DIRS)
+    // Cache trees are pruned unconditionally; non-git roots additionally prune
+    // the known non-code directories.
+    let extra: Vec<&str> = if is_git_repo {
+        CACHE_DIRS.to_vec()
+    } else {
+        CACHE_DIRS
+            .iter()
+            .chain(IGNORED_DIRS.iter())
+            .copied()
+            .collect()
+    };
+    if !extra.is_empty()
+        && let Err(e) = builder.extra_ignore(&extra)
     {
         // Interior NUL in one of the extra_ignore patterns would fail
         // here — treat as if no extras were supplied rather than

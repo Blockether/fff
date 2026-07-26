@@ -222,6 +222,31 @@ impl SharedFilePicker {
         Ok(())
     }
 
+    /// Rescan the filesystem and BLOCK until the fresh index (files + content
+    /// index) is queryable. Returns `false` on timeout.
+    ///
+    /// `trigger_full_rescan_async` alone is not enough for a read-your-writes
+    /// guarantee: it is a no-op-with-a-pending-flag while a previous scan's
+    /// post-scan indexing is still active, and `wait_for_scan` returns as soon
+    /// as the file list is committed — before the content index the grep uses
+    /// has been rebuilt. This waits for both phases, on both sides.
+    pub fn rescan_blocking(&self, shared_frecency: &SharedFrecency, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let remaining = |deadline: Instant| deadline.saturating_duration_since(Instant::now());
+
+        // 1. Let any in-flight scan settle so our rescan is actually spawned
+        //    instead of being folded into `rescan_pending`.
+        if !self.wait_for_indexing_complete(remaining(deadline)) {
+            return false;
+        }
+        if self.trigger_full_rescan_async(shared_frecency).is_err() {
+            return false;
+        }
+        // 2. `ScanJob::spawn` sets `scanning` BEFORE returning, so there is no
+        //    window where we could observe "already done" and return early.
+        self.wait_for_indexing_complete(remaining(deadline))
+    }
+
     /// Subscribe to filesystem changes matching `pattern`.
     ///
     /// Patterns may be base-relative globs (./ works), exact paths inside the indexed

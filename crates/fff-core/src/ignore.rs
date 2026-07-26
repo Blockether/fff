@@ -39,6 +39,29 @@ pub(crate) const IGNORED_DIRS: &[&str] = &[
     "AppData/Roaming",
 ];
 
+/// Directory names that hold ONLY machine-generated cache/VCS bytes: never
+/// human-authored, never worth grepping. Pruned on every walk — git or not,
+/// ignore-files respected or not — because `respect_ignore_files: false` means
+/// "show me the ignored SOURCE", not "walk 52k clj-kondo cache blobs".
+pub(crate) const CACHE_DIRS: &[&str] = &[
+    ".git",
+    ".cache", // clj-kondo, clojure-lsp, yarn, …
+    ".cpcache",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".parcel-cache",
+    ".sass-cache",
+    ".turbo",
+    ".gradle",
+];
+
+/// True when `name` is a directory component that only ever holds cache bytes.
+pub(crate) fn is_cache_dir_name(name: &str) -> bool {
+    CACHE_DIRS.contains(&name)
+}
+
 #[cfg(all(not(feature = "zlob"), feature = "ripgrep"))]
 pub(crate) fn non_git_repo_overrides(base_path: &Path) -> Option<ignore::overrides::Override> {
     use ignore::overrides::OverrideBuilder;

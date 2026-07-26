@@ -12,7 +12,7 @@
 /**
  * Current used version of [`FffCreateOptions`].
  */
-#define FFF_CREATE_OPTIONS_VERSION 2
+#define FFF_CREATE_OPTIONS_VERSION 3
 
 /**
  * Current version of [`FffWatchOptions`].
@@ -38,6 +38,7 @@
  * | `fff_health_check`         | `handle`      | `*mut c_char` (JSON string)   |
  * | `fff_get_historical_query` | `handle`      | `*mut c_char` (string or null)|
  * | `fff_wait_for_scan`        | `int_value`   | 1 = completed, 0 = timed out  |
+ * | `fff_rescan_blocking`      | `int_value`   | 1 = completed, 0 = timed out  |
  * | `fff_track_query`          | `int_value`   | 1 = success, 0 = failure      |
  * | `fff_refresh_git_status`   | `int_value`   | number of files updated       |
  * | `fff_scan_files`           | (none)        | success flag only             |
@@ -139,6 +140,15 @@ typedef struct FffCreateOptions {
    * external loop protection cyclic symlinks can wedge the watcher.
    */
   bool follow_symlinks;
+  /**
+   * Respect `.gitignore` / `.ignore` / `.git/info/exclude` and the global
+   * gitignore while scanning and while applying watcher updates. `true` by
+   * default; set to `false` for a "no ignore" index that still prunes `.git`
+   * and, outside a repo, hidden + well-known non-code directories.
+   *
+   * Callers with `version < 3` are treated as `true`.
+   */
+  bool respect_ignore_files;
 } FffCreateOptions;
 
 /**
@@ -700,6 +710,20 @@ struct FffResult *fff_get_scan_progress(void *fff_handle);
  * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
  */
 struct FffResult *fff_wait_for_scan(void *fff_handle, uint64_t timeout_ms);
+
+/**
+ * Rescan the file index and BLOCK until the fresh index is queryable.
+ *
+ * Read-your-writes: after this returns `1`, a `fff_live_grep` sees files and
+ * content written before the call. `fff_scan_files` + `fff_wait_for_scan` does
+ * NOT give that guarantee.
+ *
+ * Returns an int result: `1` when the rescan completed, `0` on timeout.
+ *
+ * ## Safety
+ * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+ */
+struct FffResult *fff_rescan_blocking(void *fff_handle, uint64_t timeout_ms);
 
 /**
  * Wait for the background file watcher to be ready.

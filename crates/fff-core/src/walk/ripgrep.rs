@@ -1,4 +1,4 @@
-use crate::ignore::non_git_repo_overrides;
+use crate::ignore::{is_cache_dir_name, non_git_repo_overrides};
 use crate::types::FileItem;
 use crate::walk::WalkOutput;
 use crate::watch::is_git_file;
@@ -14,6 +14,7 @@ pub(crate) fn walk_collect_files(
     base_path: &Path,
     is_git_repo: bool,
     follow_symlinks: bool,
+    respect_ignore_files: bool,
     threads: usize,
     synced_files_count: &Arc<AtomicUsize>,
 ) -> crate::Result<WalkOutput> {
@@ -21,16 +22,24 @@ pub(crate) fn walk_collect_files(
     walk_builder
         // this is a very important guard for the user opening ~/ or other root non-git dir
         .hidden(!is_git_repo)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .ignore(true)
+        .git_ignore(respect_ignore_files)
+        .git_exclude(respect_ignore_files)
+        .git_global(respect_ignore_files)
+        .ignore(respect_ignore_files)
         .follow_links(follow_symlinks)
         .threads(threads);
 
     if !is_git_repo && let Some(overrides) = non_git_repo_overrides(base_path) {
         walk_builder.overrides(overrides);
     }
+
+    // Machine-generated cache trees are pruned at the DIRECTORY level, so the
+    // walker never descends them even with `respect_ignore_files: false`.
+    walk_builder.filter_entry(|entry| {
+        entry.depth() == 0
+            || !entry.file_type().is_some_and(|ft| ft.is_dir())
+            || !entry.file_name().to_str().is_some_and(is_cache_dir_name)
+    });
 
     let walker = walk_builder.build_parallel();
 

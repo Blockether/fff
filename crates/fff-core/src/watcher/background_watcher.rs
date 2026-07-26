@@ -330,11 +330,15 @@ fn handle_debounced_events(
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's own ignore rules (zlob); grab a cheap Arc clone once
     // per batch so we don't hold the picker lock during filtering.
-    let walker_rules = shared_picker
+    let (walker_rules, respect_ignore_files) = shared_picker
         .read()
         .ok()
-        .and_then(|g| g.as_ref().and_then(|p| p.ignore_rules()));
-    let filter = IgnoreFilter::new(base_path, walker_rules, repo.as_ref());
+        .and_then(|g| {
+            g.as_ref()
+                .map(|p| (p.ignore_rules(), p.respects_ignore_files()))
+        })
+        .unwrap_or((None, true));
+    let filter = IgnoreFilter::new(base_path, walker_rules, repo.as_ref(), respect_ignore_files);
     let mut need_full_rescan = false;
     let mut need_full_git_rescan = false;
     let mut paths_to_remove = Vec::new();
@@ -684,15 +688,26 @@ fn track_files_from_new_directories(
 
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's ignore rules; read base_path + rules from the picker.
-    let (base_path, walker_rules) = match shared_picker.read().ok().and_then(|g| {
-        g.as_ref()
-            .map(|p| (p.base_path().to_path_buf(), p.ignore_rules()))
-    }) {
-        Some(pair) => pair,
-        None => return,
-    };
+    let (base_path, walker_rules, respect_ignore_files) =
+        match shared_picker.read().ok().and_then(|g| {
+            g.as_ref().map(|p| {
+                (
+                    p.base_path().to_path_buf(),
+                    p.ignore_rules(),
+                    p.respects_ignore_files(),
+                )
+            })
+        }) {
+            Some(triple) => triple,
+            None => return,
+        };
 
-    let filter = IgnoreFilter::new(&base_path, walker_rules, repo.as_ref());
+    let filter = IgnoreFilter::new(
+        &base_path,
+        walker_rules,
+        repo.as_ref(),
+        respect_ignore_files,
+    );
     let mut files_to_add = Vec::new();
 
     for entry in entries.flatten() {
@@ -759,6 +774,9 @@ struct IgnoreFilter<'a> {
     /// libgit2 repo, consulted only when `rules` is `None`. Borrowed from the
     /// caller's repo (also used for git-status queries) to avoid re-opening.
     repo: Option<&'a Repository>,
+    /// Mirrors the picker's scan policy: when false nothing is ever ignored,
+    /// so watcher updates cannot re-drop files the walk deliberately kept.
+    respect_ignore_files: bool,
 }
 
 impl<'a> IgnoreFilter<'a> {
@@ -766,16 +784,29 @@ impl<'a> IgnoreFilter<'a> {
         base_path: &'a Path,
         rules: Option<Arc<crate::walk::WalkIgnoreRules>>,
         repo: Option<&'a Repository>,
+        respect_ignore_files: bool,
     ) -> Self {
         Self {
             base_path,
             rules,
             repo,
+            respect_ignore_files,
         }
     }
 
     /// Whether `path` (absolute) is ignored.
     fn is_ignored(&self, path: &Path) -> bool {
+        // Cache trees are pruned by the walk under BOTH ignore policies; the
+        // watcher must agree or it re-adds what the walk deliberately dropped.
+        if path
+            .components()
+            .any(|c| c.as_os_str().to_str().is_some_and(crate::ignore::is_cache_dir_name))
+        {
+            return true;
+        }
+        if !self.respect_ignore_files {
+            return false;
+        }
         if let Some(rules) = self.rules.as_ref() {
             let Ok(rel) = path.strip_prefix(self.base_path) else {
                 return false;

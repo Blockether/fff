@@ -543,6 +543,8 @@ pub struct FilePickerOptions {
     pub watch: bool,
     /// Follow symbolic links during file indexing
     pub follow_symlinks: bool,
+    /// Honor `.gitignore`, `.ignore`, Git exclude, and global ignore files.
+    pub respect_ignore_files: bool,
     /// Allow indexing the filesystem root (`/`)
     pub enable_fs_root_scanning: bool,
     /// Allow indexing the user's home directory. Off by default for the same
@@ -560,6 +562,7 @@ impl Default for FilePickerOptions {
             cache_budget: None,
             watch: true,
             follow_symlinks: false,
+            respect_ignore_files: true,
             enable_fs_root_scanning: false,
             enable_home_dir_scanning: false,
         }
@@ -583,6 +586,7 @@ pub struct FilePicker {
     enable_content_indexing: bool,
     watch: bool,
     follow_symlinks: bool,
+    respect_ignore_files: bool,
     enable_fs_root_scanning: bool,
     enable_home_dir_scanning: bool,
     trace_span: tracing::Span,
@@ -654,6 +658,11 @@ impl FilePicker {
 
     pub fn follows_symlinks(&self) -> bool {
         self.follow_symlinks
+    }
+
+    /// Returns whether ignore files are honored during indexing and watching.
+    pub fn respects_ignore_files(&self) -> bool {
+        self.respect_ignore_files
     }
 
     pub fn fs_root_scanning_enabled(&self) -> bool {
@@ -896,6 +905,7 @@ impl FilePicker {
             enable_content_indexing: options.enable_content_indexing,
             watch: options.watch,
             follow_symlinks: options.follow_symlinks,
+            respect_ignore_files: options.respect_ignore_files,
             enable_fs_root_scanning: options.enable_fs_root_scanning,
             enable_home_dir_scanning: options.enable_home_dir_scanning,
             trace_span,
@@ -925,6 +935,7 @@ impl FilePicker {
         let watch = picker.watch;
         let mode = picker.mode;
         let follow_symlinks = picker.follow_symlinks;
+        let respect_ignore_files = picker.respect_ignore_files;
         let enable_fs_root_scanning = picker.enable_fs_root_scanning;
         let enable_home_dir_scanning = picker.enable_home_dir_scanning;
 
@@ -967,6 +978,7 @@ impl FilePicker {
                 auto_cache_budget: true,
                 install_watcher: true,
                 follow_symlinks,
+                respect_ignore_files,
                 enable_fs_root_scanning,
                 enable_home_dir_scanning,
             },
@@ -999,6 +1011,7 @@ impl FilePicker {
             &empty_frecency,
             self.mode,
             self.follow_symlinks,
+            self.respect_ignore_files,
         )?;
 
         self.sync_data = sync;
@@ -2012,6 +2025,7 @@ impl FileSync {
         shared_frecency: &SharedFrecency,
         mode: FFFMode,
         follow_symlinks: bool,
+        respect_ignore_files: bool,
     ) -> Result<FileSync, Error> {
         let scan_start = std::time::Instant::now();
         info!("SCAN: Starting filesystem walk and git status (async)");
@@ -2024,6 +2038,7 @@ impl FileSync {
             base_path,
             is_git_repo,
             follow_symlinks,
+            respect_ignore_files,
             bg_threads,
             synced_files_count,
         )?;

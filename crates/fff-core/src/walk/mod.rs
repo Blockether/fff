@@ -91,7 +91,7 @@ mod tests {
         fs::write(root.join("target/out.bin"), "bin").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, true, false, 1, &counter).unwrap();
+        let out = walk_collect_files(root, true, false, true, 1, &counter).unwrap();
 
         let mut names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
         names.sort();
@@ -115,7 +115,7 @@ mod tests {
         fs::write(root.join("index.js"), "x").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, false, false, 1, &counter).unwrap();
+        let out = walk_collect_files(root, false, false, true, 1, &counter).unwrap();
         let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
 
         assert!(names.iter().any(|n| n.ends_with("index.js")));
@@ -136,11 +136,31 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "x").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, true, false, 1, &counter).unwrap();
+        let out = walk_collect_files(root, true, false, true, 1, &counter).unwrap();
 
         let rules = out.ignore_rules.expect("zlob surfaces ignore rules");
         assert!(rules.is_ignored(Path::new("target/")));
         assert!(rules.is_ignored(Path::new("debug.log")));
         assert!(!rules.is_ignored(Path::new("Cargo.toml")));
+    }
+
+    #[test]
+    fn collects_ignored_files_when_ignore_rules_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::write(root.join(".ignore"), "*.log\n").unwrap();
+        fs::write(root.join("target/out.bin"), "bin").unwrap();
+        fs::write(root.join("debug.log"), "log").unwrap();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(root, true, false, false, 1, &counter).unwrap();
+        let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+
+        assert!(names.iter().any(|n| n.ends_with("target/out.bin")));
+        assert!(names.iter().any(|n| n.ends_with("debug.log")));
+        assert!(!names.iter().any(|n| n.contains(".git/")));
     }
 }

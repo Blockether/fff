@@ -264,6 +264,8 @@ pub unsafe extern "C" fn fff_create_instance_with(opts: *const FffCreateOptions)
             mode,
             cache_budget,
             follow_symlinks: opts.version >= 2 && opts.follow_symlinks,
+            // v1/v2 callers never opted out, so keep the historical behaviour.
+            respect_ignore_files: opts.version < 3 || opts.respect_ignore_files,
             enable_fs_root_scanning: opts.enable_fs_root_scanning,
             enable_home_dir_scanning: opts.enable_home_dir_scanning,
         },
@@ -784,6 +786,33 @@ pub unsafe extern "C" fn fff_scan_files(fff_handle: *mut c_void) -> *mut FffResu
     }
 }
 
+/// Rescan the file index and BLOCK until the fresh index is queryable.
+///
+/// Read-your-writes: after this returns `1`, a `fff_live_grep` sees files and
+/// content written before the call. `fff_scan_files` + `fff_wait_for_scan`
+/// does NOT give that guarantee (the trigger is dropped while a previous
+/// post-scan is active, and the wait ends before content indexing does).
+///
+/// Returns an int result: `1` when the rescan completed, `0` on timeout.
+///
+/// ## Safety
+/// `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_rescan_blocking(
+    fff_handle: *mut c_void,
+    timeout_ms: u64,
+) -> *mut FffResult {
+    let inst = match unsafe { instance_ref(fff_handle) } {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    let completed = inst
+        .picker
+        .rescan_blocking(&inst.frecency, Duration::from_millis(timeout_ms));
+    FffResult::ok_int(completed as i64)
+}
+
 /// Check if a scan is currently in progress.
 ///
 /// ## Safety
@@ -925,20 +954,38 @@ pub unsafe extern "C" fn fff_restart_index(
         Err(e) => return FffResult::err(&format!("Failed to acquire file picker lock: {}", e)),
     };
 
-    let (warmup_caches, content_indexing, watch, mode, fs_root, home_dir, follow_symlinks) =
-        if let Some(ref picker) = *guard {
-            (
-                picker.has_mmap_cache(),
-                picker.has_content_indexing(),
-                picker.has_watcher(),
-                picker.mode(),
-                picker.fs_root_scanning_enabled(),
-                picker.home_dir_scanning_enabled(),
-                picker.follows_symlinks(),
-            )
-        } else {
-            (false, true, true, FFFMode::default(), false, false, false)
-        };
+    let (
+        warmup_caches,
+        content_indexing,
+        watch,
+        mode,
+        fs_root,
+        home_dir,
+        follow_symlinks,
+        respect_ignore_files,
+    ) = if let Some(ref picker) = *guard {
+        (
+            picker.has_mmap_cache(),
+            picker.has_content_indexing(),
+            picker.has_watcher(),
+            picker.mode(),
+            picker.fs_root_scanning_enabled(),
+            picker.home_dir_scanning_enabled(),
+            picker.follows_symlinks(),
+            picker.respects_ignore_files(),
+        )
+    } else {
+        (
+            false,
+            true,
+            true,
+            FFFMode::default(),
+            false,
+            false,
+            false,
+            true,
+        )
+    };
 
     drop(guard);
 
@@ -953,6 +1000,7 @@ pub unsafe extern "C" fn fff_restart_index(
             mode,
             cache_budget: None,
             follow_symlinks,
+            respect_ignore_files,
             enable_fs_root_scanning: fs_root,
             enable_home_dir_scanning: home_dir,
         },

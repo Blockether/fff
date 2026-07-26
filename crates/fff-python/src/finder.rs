@@ -181,6 +181,7 @@ impl FileFinder {
         enable_fs_root_scanning=false,
         enable_home_dir_scanning=false,
         follow_symlinks=false,
+        respect_ignore_files=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -200,6 +201,7 @@ impl FileFinder {
         enable_fs_root_scanning: bool,
         enable_home_dir_scanning: bool,
         follow_symlinks: bool,
+        respect_ignore_files: bool,
     ) -> PyResult<Self> {
         let shared_picker = SharedFilePicker::default();
         let shared_frecency = SharedFrecency::default();
@@ -250,6 +252,7 @@ impl FileFinder {
                         cache_budget_max_file_size,
                     ),
                     follow_symlinks,
+                    respect_ignore_files,
                     enable_fs_root_scanning,
                     enable_home_dir_scanning,
                 },
@@ -813,7 +816,16 @@ impl FileFinder {
             }
             let canonical = fff::path_utils::canonicalize(&new_path).map_err(py_err)?;
 
-            let (warmup_caches, content_indexing, watch, mode, fs_root, home_dir, follow_symlinks) = {
+            let (
+                warmup_caches,
+                content_indexing,
+                watch,
+                mode,
+                fs_root,
+                home_dir,
+                follow_symlinks,
+                respect_ignore_files,
+            ) = {
                 let guard = picker.read().map_err(py_err)?;
                 if let Some(ref picker) = *guard {
                     (
@@ -824,9 +836,19 @@ impl FileFinder {
                         picker.fs_root_scanning_enabled(),
                         picker.home_dir_scanning_enabled(),
                         picker.follows_symlinks(),
+                        picker.respects_ignore_files(),
                     )
                 } else {
-                    (false, true, true, FFFMode::default(), false, false, false)
+                    (
+                        false,
+                        true,
+                        true,
+                        FFFMode::default(),
+                        false,
+                        false,
+                        false,
+                        true,
+                    )
                 }
             };
 
@@ -845,6 +867,7 @@ impl FileFinder {
                         cache_budget_max_file_size,
                     ),
                     follow_symlinks,
+                    respect_ignore_files,
                     enable_fs_root_scanning: fs_root,
                     enable_home_dir_scanning: home_dir,
                 },
