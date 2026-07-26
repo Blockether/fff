@@ -165,6 +165,22 @@ pub unsafe extern "C" fn fff_create_instance2(
     unsafe { fff_create_instance_with(&opts as *const FffCreateOptions) }
 }
 
+/// Split a newline-separated C string into trimmed, non-empty lines.
+///
+/// ## Safety
+/// `ptr` must be NULL or a valid null-terminated UTF-8 string.
+unsafe fn lines_of(ptr: *const c_char) -> Vec<String> {
+    unsafe { optional_cstr(ptr) }
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Create a new file finder instance from a versioned [`FffCreateOptions`] struct.
 ///
 /// Populate the struct, set `version` to [`FFF_CREATE_OPTIONS_VERSION`], pass by
@@ -247,6 +263,17 @@ pub unsafe extern "C" fn fff_create_instance_with(opts: *const FffCreateOptions)
         FFFMode::Neovim
     };
 
+    // v4 appended the ignore overlay; older callers get an empty one.
+    let ignore_overlay = if opts.version >= 4 {
+        fff::ignore::IgnoreOverlay {
+            custom_ignore_filenames: unsafe { lines_of(opts.custom_ignore_filenames) },
+            exclude_globs: unsafe { lines_of(opts.exclude_globs) },
+            unignore_globs: unsafe { lines_of(opts.unignore_globs) },
+        }
+    } else {
+        fff::ignore::IgnoreOverlay::default()
+    };
+
     let cache_budget = fff::ContentCacheBudget::from_overrides(
         opts.cache_budget_max_files as usize,
         opts.cache_budget_max_bytes,
@@ -266,6 +293,7 @@ pub unsafe extern "C" fn fff_create_instance_with(opts: *const FffCreateOptions)
             follow_symlinks: opts.version >= 2 && opts.follow_symlinks,
             // v1/v2 callers never opted out, so keep the historical behaviour.
             respect_ignore_files: opts.version < 3 || opts.respect_ignore_files,
+            ignore_overlay,
             enable_fs_root_scanning: opts.enable_fs_root_scanning,
             enable_home_dir_scanning: opts.enable_home_dir_scanning,
         },
@@ -963,6 +991,7 @@ pub unsafe extern "C" fn fff_restart_index(
         home_dir,
         follow_symlinks,
         respect_ignore_files,
+        ignore_overlay,
     ) = if let Some(ref picker) = *guard {
         (
             picker.has_mmap_cache(),
@@ -973,6 +1002,7 @@ pub unsafe extern "C" fn fff_restart_index(
             picker.home_dir_scanning_enabled(),
             picker.follows_symlinks(),
             picker.respects_ignore_files(),
+            picker.ignore_overlay().source().clone(),
         )
     } else {
         (
@@ -984,6 +1014,7 @@ pub unsafe extern "C" fn fff_restart_index(
             false,
             false,
             true,
+            fff::ignore::IgnoreOverlay::default(),
         )
     };
 
@@ -1001,6 +1032,7 @@ pub unsafe extern "C" fn fff_restart_index(
             cache_budget: None,
             follow_symlinks,
             respect_ignore_files,
+            ignore_overlay,
             enable_fs_root_scanning: fs_root,
             enable_home_dir_scanning: home_dir,
         },

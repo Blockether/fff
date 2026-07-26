@@ -18,9 +18,15 @@ pub(crate) fn walk_collect_files(
     is_git_repo: bool,
     follow_symlinks: bool,
     respect_ignore_files: bool,
+    overlay: &crate::ignore::CompiledIgnoreOverlay,
     threads: usize,
     synced_files_count: &Arc<AtomicUsize>,
 ) -> crate::Result<WalkOutput> {
+    // zlob brings its own globber and ignore rules; the overlay is a ripgrep
+    // backend feature, so surface the gap loudly instead of dropping it silently.
+    if !overlay.is_empty() {
+        tracing::warn!("ignore overlay is unsupported by the zlob walker; ignoring it");
+    }
     // Skip hidden files on non-git roots and optionally follow symlinks.
     let mut flags = if respect_ignore_files {
         WalkFlags::GITIGNORE

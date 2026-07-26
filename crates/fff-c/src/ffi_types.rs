@@ -12,7 +12,7 @@ use fff::{
 };
 
 /// Current used version of [`FffCreateOptions`].
-pub const FFF_CREATE_OPTIONS_VERSION: u32 = 3;
+pub const FFF_CREATE_OPTIONS_VERSION: u32 = 4;
 
 /// Options for `fff_create_instance_with`.
 ///
@@ -65,7 +65,21 @@ pub struct FffCreateOptions {
     ///
     /// Callers with `version < 3` are treated as `true`.
     pub respect_ignore_files: bool,
-    // ----- new version 4+ fields go here, ALWAYS appended -----
+    // ----- v4 fields -----
+    /// Extra ignore-file names to honor per directory, newline-separated
+    /// (e.g. `".rgignore"`). `.gitignore` / `.ignore` are always honored when
+    /// `respect_ignore_files` is set; this adds names the `ignore` crate does
+    /// not register on its own. NULL/empty = none.
+    pub custom_ignore_filenames: *const c_char,
+    /// Extra gitignore-syntax patterns, newline-separated, that EXCLUDE files
+    /// even when no ignore file mentions them. Applied regardless of
+    /// `respect_ignore_files`. NULL/empty = none.
+    pub exclude_globs: *const c_char,
+    /// Gitignore-syntax patterns, newline-separated, that RE-INCLUDE files an
+    /// ignore file dropped (whitelist; loses to `exclude_globs`). Ignored when
+    /// `respect_ignore_files` is false — nothing was ignored to begin with.
+    pub unignore_globs: *const c_char,
+    // ----- new version 5+ fields go here, ALWAYS appended -----
 }
 
 impl FffCreateOptions {
@@ -89,6 +103,9 @@ impl FffCreateOptions {
             enable_home_dir_scanning: false,
             follow_symlinks: false,
             respect_ignore_files: true,
+            custom_ignore_filenames: ptr::null(),
+            exclude_globs: ptr::null(),
+            unignore_globs: ptr::null(),
         }
     }
 }
@@ -795,7 +812,7 @@ mod options_layout_tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn fff_create_options_layout_is_stable_64bit() {
-        assert_eq!(size_of::<FffCreateOptions>(), 88);
+        assert_eq!(size_of::<FffCreateOptions>(), 112);
         assert_eq!(align_of::<FffCreateOptions>(), 8);
 
         assert_eq!(offset_of!(FffCreateOptions, version), 0);
@@ -815,5 +832,9 @@ mod options_layout_tests {
         assert_eq!(offset_of!(FffCreateOptions, enable_home_dir_scanning), 81);
         assert_eq!(offset_of!(FffCreateOptions, follow_symlinks), 82);
         assert_eq!(offset_of!(FffCreateOptions, respect_ignore_files), 83);
+        // ----- v4 -----
+        assert_eq!(offset_of!(FffCreateOptions, custom_ignore_filenames), 88);
+        assert_eq!(offset_of!(FffCreateOptions, exclude_globs), 96);
+        assert_eq!(offset_of!(FffCreateOptions, unignore_globs), 104);
     }
 }

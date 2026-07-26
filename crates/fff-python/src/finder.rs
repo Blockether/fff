@@ -253,6 +253,8 @@ impl FileFinder {
                     ),
                     follow_symlinks,
                     respect_ignore_files,
+                    // The python bindings expose no ignore overlay.
+                    ignore_overlay: Default::default(),
                     enable_fs_root_scanning,
                     enable_home_dir_scanning,
                 },
@@ -868,6 +870,8 @@ impl FileFinder {
                     ),
                     follow_symlinks,
                     respect_ignore_files,
+                    // The python bindings expose no ignore overlay.
+                    ignore_overlay: Default::default(),
                     enable_fs_root_scanning: fs_root,
                     enable_home_dir_scanning: home_dir,
                 },

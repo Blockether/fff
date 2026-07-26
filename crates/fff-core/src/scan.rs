@@ -55,6 +55,9 @@ pub(crate) struct ScanJob {
     mode: FFFMode,
     signals: ScanSignals,
     config: ScanConfig,
+    /// Compiled caller ignore overlay, shared with the picker and the watcher.
+    /// Lives here rather than in `ScanConfig` so that stays `Copy`.
+    ignore_overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
     /// Walker-maintained counter backing `get_scan_progress` on the UI
     /// side. Reset to 0 at scan start, incremented per-file by the
     /// walker. Shared `Arc` so the UI polls the same atomic.
@@ -84,6 +87,7 @@ impl ScanJob {
         let scanned_files_counter = picker.scanned_files_counter();
         let base_path = picker.base_path().to_path_buf();
         let trace_span = picker.trace_span();
+        let ignore_overlay = picker.ignore_overlay();
 
         let new_scan_config = ScanConfig {
             warmup: picker.has_mmap_cache(),
@@ -105,6 +109,7 @@ impl ScanJob {
             base_path,
             scanned_files_counter,
             config: new_scan_config,
+            ignore_overlay,
             shared_picker: shared_picker.clone(),
             shared_frecency: shared_frecency.clone(),
             trace_span,
@@ -120,6 +125,7 @@ impl ScanJob {
         signals: ScanSignals,
         scanned_files_counter: Arc<AtomicUsize>,
         trace_span: tracing::Span,
+        ignore_overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
         config: ScanConfig,
     ) -> Self {
         Self {
@@ -130,6 +136,7 @@ impl ScanJob {
             signals,
             scanned_files_counter,
             config,
+            ignore_overlay,
             trace_span,
         }
     }
@@ -160,6 +167,7 @@ impl ScanJob {
             signals,
             scanned_files_counter,
             config,
+            ignore_overlay,
             trace_span: _,
         } = self;
 
@@ -176,6 +184,7 @@ impl ScanJob {
             mode,
             config.follow_symlinks,
             config.respect_ignore_files,
+            &ignore_overlay,
         ) {
             Ok(sync) => sync,
             Err(e) => {

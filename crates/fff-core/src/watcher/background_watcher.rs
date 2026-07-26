@@ -330,15 +330,26 @@ fn handle_debounced_events(
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's own ignore rules (zlob); grab a cheap Arc clone once
     // per batch so we don't hold the picker lock during filtering.
-    let (walker_rules, respect_ignore_files) = shared_picker
+    let (walker_rules, respect_ignore_files, overlay) = shared_picker
         .read()
         .ok()
         .and_then(|g| {
-            g.as_ref()
-                .map(|p| (p.ignore_rules(), p.respects_ignore_files()))
+            g.as_ref().map(|p| {
+                (
+                    p.ignore_rules(),
+                    p.respects_ignore_files(),
+                    p.ignore_overlay(),
+                )
+            })
         })
-        .unwrap_or((None, true));
-    let filter = IgnoreFilter::new(base_path, walker_rules, repo.as_ref(), respect_ignore_files);
+        .unwrap_or_else(|| (None, true, Arc::new(Default::default())));
+    let filter = IgnoreFilter::new(
+        base_path,
+        walker_rules,
+        repo.as_ref(),
+        respect_ignore_files,
+        overlay,
+    );
     let mut need_full_rescan = false;
     let mut need_full_git_rescan = false;
     let mut paths_to_remove = Vec::new();
@@ -688,17 +699,18 @@ fn track_files_from_new_directories(
 
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's ignore rules; read base_path + rules from the picker.
-    let (base_path, walker_rules, respect_ignore_files) =
+    let (base_path, walker_rules, respect_ignore_files, overlay) =
         match shared_picker.read().ok().and_then(|g| {
             g.as_ref().map(|p| {
                 (
                     p.base_path().to_path_buf(),
                     p.ignore_rules(),
                     p.respects_ignore_files(),
+                    p.ignore_overlay(),
                 )
             })
         }) {
-            Some(triple) => triple,
+            Some(quad) => quad,
             None => return,
         };
 
@@ -707,6 +719,7 @@ fn track_files_from_new_directories(
         walker_rules,
         repo.as_ref(),
         respect_ignore_files,
+        overlay,
     );
     let mut files_to_add = Vec::new();
 
@@ -777,6 +790,9 @@ struct IgnoreFilter<'a> {
     /// Mirrors the picker's scan policy: when false nothing is ever ignored,
     /// so watcher updates cannot re-drop files the walk deliberately kept.
     respect_ignore_files: bool,
+    /// The SAME caller overlay the walk used: without it the watcher would
+    /// re-admit `exclude_globs` files and re-drop `unignore_globs` ones.
+    overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
 }
 
 impl<'a> IgnoreFilter<'a> {
@@ -785,12 +801,14 @@ impl<'a> IgnoreFilter<'a> {
         rules: Option<Arc<crate::walk::WalkIgnoreRules>>,
         repo: Option<&'a Repository>,
         respect_ignore_files: bool,
+        overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
     ) -> Self {
         Self {
             base_path,
             rules,
             repo,
             respect_ignore_files,
+            overlay,
         }
     }
 
@@ -798,11 +816,22 @@ impl<'a> IgnoreFilter<'a> {
     fn is_ignored(&self, path: &Path) -> bool {
         // Cache trees are pruned by the walk under BOTH ignore policies; the
         // watcher must agree or it re-adds what the walk deliberately dropped.
-        if path
-            .components()
-            .any(|c| c.as_os_str().to_str().is_some_and(crate::ignore::is_cache_dir_name))
-        {
+        if path.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(crate::ignore::is_cache_dir_name)
+        }) {
             return true;
+        }
+        // The caller overlay outranks the ignore files in BOTH directions.
+        let rel = path.strip_prefix(self.base_path).ok();
+        if let Some(rel) = rel {
+            if self.overlay.is_excluded(rel, false) {
+                return true;
+            }
+            if self.overlay.is_unignored(rel, false) {
+                return false;
+            }
         }
         if !self.respect_ignore_files {
             return false;

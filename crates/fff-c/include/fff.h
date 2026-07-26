@@ -12,7 +12,7 @@
 /**
  * Current used version of [`FffCreateOptions`].
  */
-#define FFF_CREATE_OPTIONS_VERSION 3
+#define FFF_CREATE_OPTIONS_VERSION 4
 
 /**
  * Current version of [`FffWatchOptions`].
@@ -38,7 +38,6 @@
  * | `fff_health_check`         | `handle`      | `*mut c_char` (JSON string)   |
  * | `fff_get_historical_query` | `handle`      | `*mut c_char` (string or null)|
  * | `fff_wait_for_scan`        | `int_value`   | 1 = completed, 0 = timed out  |
- * | `fff_rescan_blocking`      | `int_value`   | 1 = completed, 0 = timed out  |
  * | `fff_track_query`          | `int_value`   | 1 = success, 0 = failure      |
  * | `fff_refresh_git_status`   | `int_value`   | number of files updated       |
  * | `fff_scan_files`           | (none)        | success flag only             |
@@ -143,12 +142,31 @@ typedef struct FffCreateOptions {
   /**
    * Respect `.gitignore` / `.ignore` / `.git/info/exclude` and the global
    * gitignore while scanning and while applying watcher updates. `true` by
-   * default; set to `false` for a "no ignore" index that still prunes `.git`
-   * and, outside a repo, hidden + well-known non-code directories.
+   * default; set to `false` for a "no ignore" index that still prunes
+   * `.git` and, outside a repo, hidden + well-known non-code directories.
    *
    * Callers with `version < 3` are treated as `true`.
    */
   bool respect_ignore_files;
+  /**
+   * Extra ignore-file names to honor per directory, newline-separated
+   * (e.g. `".rgignore"`). `.gitignore` / `.ignore` are always honored when
+   * `respect_ignore_files` is set; this adds names the `ignore` crate does
+   * not register on its own. NULL/empty = none.
+   */
+  const char *custom_ignore_filenames;
+  /**
+   * Extra gitignore-syntax patterns, newline-separated, that EXCLUDE files
+   * even when no ignore file mentions them. Applied regardless of
+   * `respect_ignore_files`. NULL/empty = none.
+   */
+  const char *exclude_globs;
+  /**
+   * Gitignore-syntax patterns, newline-separated, that RE-INCLUDE files an
+   * ignore file dropped (whitelist; loses to `exclude_globs`). Ignored when
+   * `respect_ignore_files` is false — nothing was ignored to begin with.
+   */
+  const char *unignore_globs;
 } FffCreateOptions;
 
 /**
@@ -679,6 +697,21 @@ struct FffResult *fff_multi_grep(void *fff_handle,
 struct FffResult *fff_scan_files(void *fff_handle);
 
 /**
+ * Rescan the file index and BLOCK until the fresh index is queryable.
+ *
+ * Read-your-writes: after this returns `1`, a `fff_live_grep` sees files and
+ * content written before the call. `fff_scan_files` + `fff_wait_for_scan`
+ * does NOT give that guarantee (the trigger is dropped while a previous
+ * post-scan is active, and the wait ends before content indexing does).
+ *
+ * Returns an int result: `1` when the rescan completed, `0` on timeout.
+ *
+ * ## Safety
+ * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+ */
+struct FffResult *fff_rescan_blocking(void *fff_handle, uint64_t timeout_ms);
+
+/**
  * Check if a scan is currently in progress.
  *
  * ## Safety
@@ -710,20 +743,6 @@ struct FffResult *fff_get_scan_progress(void *fff_handle);
  * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
  */
 struct FffResult *fff_wait_for_scan(void *fff_handle, uint64_t timeout_ms);
-
-/**
- * Rescan the file index and BLOCK until the fresh index is queryable.
- *
- * Read-your-writes: after this returns `1`, a `fff_live_grep` sees files and
- * content written before the call. `fff_scan_files` + `fff_wait_for_scan` does
- * NOT give that guarantee.
- *
- * Returns an int result: `1` when the rescan completed, `0` on timeout.
- *
- * ## Safety
- * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
- */
-struct FffResult *fff_rescan_blocking(void *fff_handle, uint64_t timeout_ms);
 
 /**
  * Wait for the background file watcher to be ready.
@@ -1345,7 +1364,7 @@ struct FffResult *fff_watch_args(void *fff_handle,
 struct FffResult *fff_unwatch(void *fff_handle, uint64_t watch_id);
 
 /**
- * Number of events in a batch; 0 if `batch` is null.
+ * Number of events in a batch, 0 if `batch` is null.
  *
  * ## Safety
  * `batch` must be a valid `FffWatchEventBatch` pointer or null.

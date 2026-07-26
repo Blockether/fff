@@ -70,6 +70,7 @@ impl WalkIgnoreRules {
 #[cfg(test)]
 mod tests {
     use super::walk_collect_files;
+    use crate::ignore::IgnoreOverlay;
     use std::fs;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,7 +92,16 @@ mod tests {
         fs::write(root.join("target/out.bin"), "bin").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, true, false, true, 1, &counter).unwrap();
+        let out = walk_collect_files(
+            root,
+            true,
+            false,
+            true,
+            &IgnoreOverlay::default().compile(root),
+            1,
+            &counter,
+        )
+        .unwrap();
 
         let mut names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
         names.sort();
@@ -115,7 +125,16 @@ mod tests {
         fs::write(root.join("index.js"), "x").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, false, false, true, 1, &counter).unwrap();
+        let out = walk_collect_files(
+            root,
+            false,
+            false,
+            true,
+            &IgnoreOverlay::default().compile(root),
+            1,
+            &counter,
+        )
+        .unwrap();
         let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
 
         assert!(names.iter().any(|n| n.ends_with("index.js")));
@@ -136,7 +155,16 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "x").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, true, false, true, 1, &counter).unwrap();
+        let out = walk_collect_files(
+            root,
+            true,
+            false,
+            true,
+            &IgnoreOverlay::default().compile(root),
+            1,
+            &counter,
+        )
+        .unwrap();
 
         let rules = out.ignore_rules.expect("zlob surfaces ignore rules");
         assert!(rules.is_ignored(Path::new("target/")));
@@ -156,11 +184,80 @@ mod tests {
         fs::write(root.join("debug.log"), "log").unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let out = walk_collect_files(root, true, false, false, 1, &counter).unwrap();
+        let out = walk_collect_files(
+            root,
+            true,
+            false,
+            false,
+            &IgnoreOverlay::default().compile(root),
+            1,
+            &counter,
+        )
+        .unwrap();
         let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
 
         assert!(names.iter().any(|n| n.ends_with("target/out.bin")));
         assert!(names.iter().any(|n| n.ends_with("debug.log")));
         assert!(!names.iter().any(|n| n.contains(".git/")));
+    }
+
+    // `.rgignore` is the one ignore filename ripgrep's `ignore` crate does not
+    // register on its own; the overlay opts it in per walk.
+    #[test]
+    fn honors_custom_ignore_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".rgignore"), "skipped/\n").unwrap();
+        fs::create_dir(root.join("skipped")).unwrap();
+        fs::write(root.join("skipped/a.txt"), "x").unwrap();
+        fs::write(root.join("kept.txt"), "x").unwrap();
+
+        let overlay = IgnoreOverlay {
+            custom_ignore_filenames: vec![".rgignore".into()],
+            ..Default::default()
+        }
+        .compile(root);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(root, true, false, true, &overlay, 1, &counter).unwrap();
+        let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+
+        assert!(names.iter().any(|n| n.ends_with("kept.txt")));
+        assert!(!names.iter().any(|n| n.contains("skipped")));
+    }
+
+    // `exclude_globs` drop files the ignore files kept; `unignore_globs`
+    // resurrect a subtree a .gitignore dropped (walker never descends it).
+    #[test]
+    fn applies_exclude_and_unignore_globs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target/keep")).unwrap();
+        fs::create_dir_all(root.join("target/skip")).unwrap();
+        fs::create_dir(root.join("secrets")).unwrap();
+        fs::write(root.join("target/keep/a.txt"), "x").unwrap();
+        fs::write(root.join("target/skip/b.txt"), "x").unwrap();
+        fs::write(root.join("secrets/key.pem"), "x").unwrap();
+        fs::write(root.join("main.rs"), "x").unwrap();
+
+        let overlay = IgnoreOverlay {
+            exclude_globs: vec!["secrets/**".into()],
+            unignore_globs: vec!["target/keep/**".into()],
+            ..Default::default()
+        }
+        .compile(root);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(root, true, false, true, &overlay, 1, &counter).unwrap();
+        let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+
+        assert!(names.iter().any(|n| n.ends_with("main.rs")));
+        assert!(names.iter().any(|n| n.ends_with("target/keep/a.txt")));
+        assert!(!names.iter().any(|n| n.contains("target/skip")));
+        assert!(!names.iter().any(|n| n.contains("secrets")));
+        assert_eq!(counter.load(Ordering::Relaxed), names.len());
     }
 }

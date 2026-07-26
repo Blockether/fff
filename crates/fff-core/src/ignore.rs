@@ -89,3 +89,229 @@ pub(crate) fn is_non_code_directory(path: &Path) -> bool {
         path_str.contains(dir)
     })
 }
+
+/// Caller-supplied ignore OVERLAY, layered on top of the ignore-file policy.
+///
+/// Lets an embedder express the two things ripgrep's `ignore` crate cannot:
+/// an extra ignore-file NAME (`.rgignore`) and a per-project re-include of
+/// paths a `.gitignore` dropped. The resulting decision is
+///
+/// ```text
+/// excluded(f) = exclude_globs(f) OR (ignored(f) AND NOT unignore_globs(f))
+/// ```
+///
+/// Both glob lists speak `.gitignore` pattern syntax (NOT ripgrep `-g`
+/// override syntax, whose whitelist semantics are inverted and would drop
+/// every non-matching file). Empty lists = no overlay, zero cost.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IgnoreOverlay {
+    /// Extra ignore-file names honored in every directory, e.g. `.rgignore`.
+    /// Applied only when ignore files are respected at all.
+    pub custom_ignore_filenames: Vec<String>,
+    /// Always dropped, whatever the ignore files say.
+    pub exclude_globs: Vec<String>,
+    /// Re-included even when an ignore file excludes them. A gitignored
+    /// DIRECTORY is never descended by the walker, so these subtrees are
+    /// collected by a second, ignore-free pass over each pattern's static
+    /// prefix.
+    pub unignore_globs: Vec<String>,
+}
+
+impl IgnoreOverlay {
+    /// True when the overlay adds nothing (the common case).
+    pub fn is_empty(&self) -> bool {
+        self.custom_ignore_filenames.is_empty()
+            && self.exclude_globs.is_empty()
+            && self.unignore_globs.is_empty()
+    }
+
+    /// Compile the glob lists once, against `base_path`.
+    pub fn compile(&self, base_path: &Path) -> CompiledIgnoreOverlay {
+        CompiledIgnoreOverlay::new(self.clone(), base_path)
+    }
+}
+
+/// The literal directory prefix of a `.gitignore`-style pattern: every leading
+/// component up to the first one carrying a glob meta character. `**/vendored`
+/// yields `""` — "any directory might match", so the whole tree is reopened.
+fn glob_static_prefix(pattern: &str) -> String {
+    let pattern = pattern.trim_start_matches('/');
+    let mut out: Vec<&str> = Vec::new();
+    for component in pattern.split('/') {
+        if component.is_empty() {
+            continue;
+        }
+        if component.contains(['*', '?', '[', ']', '{', '}', '!']) {
+            break;
+        }
+        out.push(component);
+    }
+    out.join("/")
+}
+
+#[cfg(feature = "ripgrep")]
+#[derive(Debug)]
+pub struct CompiledIgnoreOverlay {
+    overlay: IgnoreOverlay,
+    exclude: Option<::ignore::gitignore::Gitignore>,
+    unignore: Option<::ignore::gitignore::Gitignore>,
+    unignore_roots: Vec<std::path::PathBuf>,
+}
+
+#[cfg(feature = "ripgrep")]
+impl Default for CompiledIgnoreOverlay {
+    fn default() -> Self {
+        IgnoreOverlay::default().compile(Path::new(""))
+    }
+}
+
+#[cfg(feature = "ripgrep")]
+impl CompiledIgnoreOverlay {
+    fn new(overlay: IgnoreOverlay, base_path: &Path) -> Self {
+        let build = |patterns: &[String]| -> Option<::ignore::gitignore::Gitignore> {
+            if patterns.is_empty() {
+                return None;
+            }
+            let mut builder = ::ignore::gitignore::GitignoreBuilder::new(base_path);
+            for pattern in patterns {
+                if let Err(e) = builder.add_line(None, pattern) {
+                    tracing::warn!("ignoring malformed overlay pattern {pattern}: {e}");
+                }
+            }
+            builder.build().ok()
+        };
+
+        let unignore_roots = overlay
+            .unignore_globs
+            .iter()
+            .map(|g| base_path.join(glob_static_prefix(g)))
+            .collect();
+
+        Self {
+            exclude: build(&overlay.exclude_globs),
+            unignore: build(&overlay.unignore_globs),
+            unignore_roots,
+            overlay,
+        }
+    }
+
+    /// The uncompiled overlay this was built from, for rebuilding against a
+    /// new base path (e.g. on directory change).
+    pub fn source(&self) -> &IgnoreOverlay {
+        &self.overlay
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.overlay.is_empty()
+    }
+
+    pub(crate) fn custom_ignore_filenames(&self) -> &[String] {
+        &self.overlay.custom_ignore_filenames
+    }
+
+    /// Roots (absolute, deduped by the caller) that a second ignore-free pass
+    /// must walk to surface the re-included files.
+    pub(crate) fn unignore_roots(&self) -> &[std::path::PathBuf] {
+        &self.unignore_roots
+    }
+
+    /// `rel` is base-relative and `/`-separated.
+    pub(crate) fn is_excluded(&self, rel: &Path, is_dir: bool) -> bool {
+        self.exclude
+            .as_ref()
+            .is_some_and(|g| g.matched_path_or_any_parents(rel, is_dir).is_ignore())
+    }
+
+    /// `rel` is base-relative and `/`-separated.
+    pub(crate) fn is_unignored(&self, rel: &Path, is_dir: bool) -> bool {
+        self.unignore
+            .as_ref()
+            .is_some_and(|g| g.matched_path_or_any_parents(rel, is_dir).is_ignore())
+    }
+}
+
+// Without the `ripgrep` feature there is no gitignore matcher to compile
+// against (the zlob backend brings its own globber), so the overlay degrades
+// to "no overlay" instead of failing the build.
+#[cfg(not(feature = "ripgrep"))]
+#[derive(Debug)]
+pub struct CompiledIgnoreOverlay {
+    overlay: IgnoreOverlay,
+}
+
+#[cfg(not(feature = "ripgrep"))]
+impl Default for CompiledIgnoreOverlay {
+    fn default() -> Self {
+        IgnoreOverlay::default().compile(Path::new(""))
+    }
+}
+
+#[cfg(not(feature = "ripgrep"))]
+impl CompiledIgnoreOverlay {
+    fn new(overlay: IgnoreOverlay, _base_path: &Path) -> Self {
+        if !overlay.is_empty() {
+            tracing::warn!("ignore overlay requires the `ripgrep` feature; ignoring it");
+        }
+        Self { overlay }
+    }
+
+    /// The uncompiled overlay this was built from, for rebuilding against a
+    /// new base path (e.g. on directory change).
+    pub fn source(&self) -> &IgnoreOverlay {
+        &self.overlay
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.overlay.is_empty()
+    }
+
+    pub(crate) fn custom_ignore_filenames(&self) -> &[String] {
+        &[]
+    }
+
+    pub(crate) fn unignore_roots(&self) -> &[std::path::PathBuf] {
+        &[]
+    }
+
+    pub(crate) fn is_excluded(&self, _rel: &Path, _is_dir: bool) -> bool {
+        false
+    }
+
+    pub(crate) fn is_unignored(&self, _rel: &Path, _is_dir: bool) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    #[test]
+    fn static_prefixes() {
+        assert_eq!(glob_static_prefix("repositories/**"), "repositories");
+        assert_eq!(glob_static_prefix("/build/out/*.js"), "build/out");
+        assert_eq!(glob_static_prefix("**/vendored/"), "");
+        assert_eq!(glob_static_prefix("dist"), "dist");
+    }
+
+    #[cfg(feature = "ripgrep")]
+    #[test]
+    fn matches_directories_and_children() {
+        let overlay = IgnoreOverlay {
+            custom_ignore_filenames: vec![".rgignore".into()],
+            exclude_globs: vec!["secrets/**".into()],
+            unignore_globs: vec!["target/keep/**".into()],
+        };
+        let compiled = overlay.compile(Path::new("/repo"));
+        assert!(!compiled.is_empty());
+        assert!(compiled.is_excluded(Path::new("secrets/key.pem"), false));
+        assert!(!compiled.is_excluded(Path::new("src/main.rs"), false));
+        assert!(compiled.is_unignored(Path::new("target/keep/a.txt"), false));
+        assert!(!compiled.is_unignored(Path::new("target/other/a.txt"), false));
+        assert_eq!(compiled.unignore_roots(), [Path::new("/repo/target/keep")]);
+        assert_eq!(
+            compiled.custom_ignore_filenames(),
+            [".rgignore".to_string()]
+        );
+    }
+}

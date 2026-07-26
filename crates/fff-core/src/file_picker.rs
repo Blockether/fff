@@ -545,6 +545,9 @@ pub struct FilePickerOptions {
     pub follow_symlinks: bool,
     /// Honor `.gitignore`, `.ignore`, Git exclude, and global ignore files.
     pub respect_ignore_files: bool,
+    /// Caller overlay on top of the ignore files: extra ignore-file names,
+    /// always-excluded globs, and globs re-included despite being ignored.
+    pub ignore_overlay: crate::ignore::IgnoreOverlay,
     /// Allow indexing the filesystem root (`/`)
     pub enable_fs_root_scanning: bool,
     /// Allow indexing the user's home directory. Off by default for the same
@@ -563,6 +566,7 @@ impl Default for FilePickerOptions {
             watch: true,
             follow_symlinks: false,
             respect_ignore_files: true,
+            ignore_overlay: crate::ignore::IgnoreOverlay::default(),
             enable_fs_root_scanning: false,
             enable_home_dir_scanning: false,
         }
@@ -587,6 +591,7 @@ pub struct FilePicker {
     watch: bool,
     follow_symlinks: bool,
     respect_ignore_files: bool,
+    ignore_overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
     enable_fs_root_scanning: bool,
     enable_home_dir_scanning: bool,
     trace_span: tracing::Span,
@@ -663,6 +668,12 @@ impl FilePicker {
     /// Returns whether ignore files are honored during indexing and watching.
     pub fn respects_ignore_files(&self) -> bool {
         self.respect_ignore_files
+    }
+
+    /// The compiled caller overlay, shared with the scan job and the watcher so
+    /// all three agree on which files belong to the index.
+    pub fn ignore_overlay(&self) -> Arc<crate::ignore::CompiledIgnoreOverlay> {
+        Arc::clone(&self.ignore_overlay)
     }
 
     pub fn fs_root_scanning_enabled(&self) -> bool {
@@ -890,6 +901,7 @@ impl FilePicker {
 
         let trace_id = crate::log::generate_trace_id();
         let trace_span = crate::log::trace_span(&trace_id, "picker");
+        let ignore_overlay = Arc::new(options.ignore_overlay.compile(&path));
 
         Ok(FilePicker {
             background_watcher: None,
@@ -906,6 +918,7 @@ impl FilePicker {
             watch: options.watch,
             follow_symlinks: options.follow_symlinks,
             respect_ignore_files: options.respect_ignore_files,
+            ignore_overlay,
             enable_fs_root_scanning: options.enable_fs_root_scanning,
             enable_home_dir_scanning: options.enable_home_dir_scanning,
             trace_span,
@@ -936,6 +949,7 @@ impl FilePicker {
         let mode = picker.mode;
         let follow_symlinks = picker.follow_symlinks;
         let respect_ignore_files = picker.respect_ignore_files;
+        let ignore_overlay = picker.ignore_overlay();
         let enable_fs_root_scanning = picker.enable_fs_root_scanning;
         let enable_home_dir_scanning = picker.enable_home_dir_scanning;
 
@@ -971,6 +985,7 @@ impl FilePicker {
             signals,
             scanned_files_counter,
             trace_span,
+            ignore_overlay,
             ScanConfig {
                 warmup,
                 content_indexing,
@@ -1012,6 +1027,7 @@ impl FilePicker {
             self.mode,
             self.follow_symlinks,
             self.respect_ignore_files,
+            &self.ignore_overlay,
         )?;
 
         self.sync_data = sync;
@@ -2026,6 +2042,7 @@ impl FileSync {
         mode: FFFMode,
         follow_symlinks: bool,
         respect_ignore_files: bool,
+        ignore_overlay: &crate::ignore::CompiledIgnoreOverlay,
     ) -> Result<FileSync, Error> {
         let scan_start = std::time::Instant::now();
         info!("SCAN: Starting filesystem walk and git status (async)");
@@ -2039,6 +2056,7 @@ impl FileSync {
             is_git_repo,
             follow_symlinks,
             respect_ignore_files,
+            ignore_overlay,
             bg_threads,
             synced_files_count,
         )?;
