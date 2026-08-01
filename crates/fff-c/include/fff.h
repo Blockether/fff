@@ -1311,6 +1311,166 @@ uint32_t fff_grep_result_get_next_file_offset(const struct FffGrepResult *r);
 const char *fff_grep_result_get_regex_fallback_error(const struct FffGrepResult *r);
 
 /**
+ * Relative path of a directory item; null if `item` is null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffDirItem` pointer or null.
+ */
+const char *fff_dir_item_get_relative_path(const struct FffDirItem *item);
+
+/**
+ * Last path segment of a directory item; null if `item` is null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffDirItem` pointer or null.
+ */
+const char *fff_dir_item_get_dir_name(const struct FffDirItem *item);
+
+/**
+ * Maximum child access-frecency score for a directory item; `0` if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffDirItem` pointer or null.
+ */
+int32_t fff_dir_item_get_max_access_frecency(const struct FffDirItem *item);
+
+/**
+ * Number of returned directories; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffDirSearchResult` pointer or null.
+ */
+uint32_t fff_dir_search_result_get_count(const struct FffDirSearchResult *result);
+
+/**
+ * Total directories matching the query before pagination; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffDirSearchResult` pointer or null.
+ */
+uint32_t fff_dir_search_result_get_total_matched(const struct FffDirSearchResult *result);
+
+/**
+ * Total indexed directories; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffDirSearchResult` pointer or null.
+ */
+uint32_t fff_dir_search_result_get_total_dirs(const struct FffDirSearchResult *result);
+
+/**
+ * Whether a mixed item is a directory; false if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+bool fff_mixed_item_get_is_directory(const struct FffMixedItem *item);
+
+/**
+ * Relative path of a mixed item; null if `item` is null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+const char *fff_mixed_item_get_relative_path(const struct FffMixedItem *item);
+
+/**
+ * Display name of a mixed item; null if `item` is null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+const char *fff_mixed_item_get_display_name(const struct FffMixedItem *item);
+
+/**
+ * Git status of a mixed item; null if unavailable or `item` is null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+const char *fff_mixed_item_get_git_status(const struct FffMixedItem *item);
+
+/**
+ * Size of a mixed file item, or `0` for directories/null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+uint64_t fff_mixed_item_get_size(const struct FffMixedItem *item);
+
+/**
+ * Modification timestamp of a mixed file item, or `0` for directories/null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+uint64_t fff_mixed_item_get_modified(const struct FffMixedItem *item);
+
+/**
+ * Access frecency score of a mixed item, or `0` if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+int64_t fff_mixed_item_get_access_frecency_score(const struct FffMixedItem *item);
+
+/**
+ * Modification frecency score of a mixed file item, or `0` for directories/null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+int64_t fff_mixed_item_get_modification_frecency_score(const struct FffMixedItem *item);
+
+/**
+ * Total frecency score of a mixed file item, or `0` for directories/null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+int64_t fff_mixed_item_get_total_frecency_score(const struct FffMixedItem *item);
+
+/**
+ * Whether a mixed item is binary; false if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffMixedItem` pointer or null.
+ */
+bool fff_mixed_item_get_is_binary(const struct FffMixedItem *item);
+
+/**
+ * Number of returned mixed items; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffMixedSearchResult` pointer or null.
+ */
+uint32_t fff_mixed_search_result_get_count(const struct FffMixedSearchResult *result);
+
+/**
+ * Total mixed items matching the query before pagination; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffMixedSearchResult` pointer or null.
+ */
+uint32_t fff_mixed_search_result_get_total_matched(const struct FffMixedSearchResult *result);
+
+/**
+ * Total indexed files represented by a mixed result; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffMixedSearchResult` pointer or null.
+ */
+uint32_t fff_mixed_search_result_get_total_files(const struct FffMixedSearchResult *result);
+
+/**
+ * Total indexed directories represented by a mixed result; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffMixedSearchResult` pointer or null.
+ */
+uint32_t fff_mixed_search_result_get_total_dirs(const struct FffMixedSearchResult *result);
+
+/**
  * Register the instance-wide watch callback used by all `fff_watch`
  * subscriptions; call before the first `fff_watch`, calling again replaces it.
  *

@@ -604,6 +604,280 @@ pub unsafe extern "C" fn fff_grep_result_get_regex_fallback_error(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// Relative path of a directory item; null if `item` is null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffDirItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_dir_item_get_relative_path(
+    item: *const crate::ffi_types::FffDirItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).relative_path }
+}
+
+/// Last path segment of a directory item; null if `item` is null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffDirItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_dir_item_get_dir_name(
+    item: *const crate::ffi_types::FffDirItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).dir_name }
+}
+
+/// Maximum child access-frecency score for a directory item; `0` if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffDirItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_dir_item_get_max_access_frecency(
+    item: *const crate::ffi_types::FffDirItem,
+) -> i32 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).max_access_frecency }
+}
+
+/// Number of returned directories; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffDirSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_dir_search_result_get_count(
+    result: *const crate::ffi_types::FffDirSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).count }
+}
+
+/// Total directories matching the query before pagination; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffDirSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_dir_search_result_get_total_matched(
+    result: *const crate::ffi_types::FffDirSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).total_matched }
+}
+
+/// Total indexed directories; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffDirSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_dir_search_result_get_total_dirs(
+    result: *const crate::ffi_types::FffDirSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).total_dirs }
+}
+
+/// Whether a mixed item is a directory; false if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_is_directory(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> bool {
+    !item.is_null() && unsafe { (*item).item_type == 1 }
+}
+
+/// Relative path of a mixed item; null if `item` is null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_relative_path(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).relative_path }
+}
+
+/// Display name of a mixed item; null if `item` is null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_display_name(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).display_name }
+}
+
+/// Git status of a mixed item; null if unavailable or `item` is null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_git_status(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).git_status }
+}
+
+/// Size of a mixed file item, or `0` for directories/null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_size(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> u64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).size }
+}
+
+/// Modification timestamp of a mixed file item, or `0` for directories/null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_modified(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> u64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).modified }
+}
+
+/// Access frecency score of a mixed item, or `0` if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_access_frecency_score(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> i64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).access_frecency_score }
+}
+
+/// Modification frecency score of a mixed file item, or `0` for directories/null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_modification_frecency_score(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> i64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).modification_frecency_score }
+}
+
+/// Total frecency score of a mixed file item, or `0` for directories/null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_total_frecency_score(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> i64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).total_frecency_score }
+}
+
+/// Whether a mixed item is binary; false if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffMixedItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_item_get_is_binary(
+    item: *const crate::ffi_types::FffMixedItem,
+) -> bool {
+    !item.is_null() && unsafe { (*item).is_binary }
+}
+
+/// Number of returned mixed items; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffMixedSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_search_result_get_count(
+    result: *const crate::ffi_types::FffMixedSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).count }
+}
+
+/// Total mixed items matching the query before pagination; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffMixedSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_search_result_get_total_matched(
+    result: *const crate::ffi_types::FffMixedSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).total_matched }
+}
+
+/// Total indexed files represented by a mixed result; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffMixedSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_search_result_get_total_files(
+    result: *const crate::ffi_types::FffMixedSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).total_files }
+}
+
+/// Total indexed directories represented by a mixed result; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffMixedSearchResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_mixed_search_result_get_total_dirs(
+    result: *const crate::ffi_types::FffMixedSearchResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).total_dirs }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

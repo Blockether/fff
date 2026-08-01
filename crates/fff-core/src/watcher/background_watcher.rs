@@ -733,10 +733,6 @@ fn track_files_from_new_directories(
         }
     }
 
-    if files_to_add.is_empty() {
-        return;
-    }
-
     let mut indexed_files = Vec::with_capacity(files_to_add.len());
     {
         let Ok(mut guard) = shared_picker.write() else {
@@ -747,11 +743,18 @@ fn track_files_from_new_directories(
             return;
         };
 
+        // Directory entries are first-class now: retain empty directories as
+        // soon as their watcher has been installed.
+        picker.handle_directory_create(dir);
         for path in &files_to_add {
             if picker.handle_create_or_modify(path).is_some() {
                 indexed_files.push(path.clone());
             }
         }
+    }
+
+    if indexed_files.is_empty() {
+        return;
     }
     let added = indexed_files.len();
 

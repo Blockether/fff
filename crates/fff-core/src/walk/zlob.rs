@@ -69,12 +69,25 @@ pub(crate) fn walk_collect_files(
     }
 
     let pairs = parking_lot::Mutex::new(Vec::<(FileItem, String)>::new());
+    let dirs = parking_lot::Mutex::new(Vec::<String>::new());
 
     let outcome = match builder.run(|entry| {
-        if !entry.is_file() {
+        if !entry.is_file() && !entry.is_dir() {
             return WalkState::Continue;
         }
         let rel_bytes = entry.relative_path_bytes();
+        // zlob emits '/'-separated relative paths, which is fff's canonical
+        // internal form on every platform — store them verbatim.
+        let rel_str = String::from_utf8_lossy(rel_bytes).into_owned();
+
+        if entry.is_dir() {
+            // The walk root is implicit and has no searchable relative path.
+            if !rel_str.is_empty() && rel_str != "." {
+                let dir = format!("{}/", rel_str.trim_end_matches('/'));
+                dirs.lock().push(dir);
+            }
+            return WalkState::Continue;
+        }
 
         // `basename()` returns `&str` for files only.
         let basename = entry.basename().unwrap_or("");
@@ -88,9 +101,6 @@ pub(crate) fn walk_collect_files(
             .unwrap_or(0);
 
         let basename_offset = entry.basename_offset_in_relative();
-        // zlob emits '/'-separated relative paths, which is fff's canonical
-        // internal form on every platform — store them verbatim.
-        let rel_str = String::from_utf8_lossy(rel_bytes).into_owned();
         let item = FileItem::new_raw(basename_offset, size, modified, None, is_binary);
 
         let mut guard = pairs.lock();
@@ -114,6 +124,9 @@ pub(crate) fn walk_collect_files(
     };
 
     let pairs = pairs.into_inner();
+    let mut dirs = dirs.into_inner();
+    dirs.sort_unstable();
+    dirs.dedup();
     // Always report the exact final total regardless of the last step.
     synced_files_count.store(pairs.len(), Ordering::Relaxed);
 
@@ -126,6 +139,7 @@ pub(crate) fn walk_collect_files(
 
     Ok(WalkOutput {
         pairs,
+        dirs,
         ignore_rules,
     })
 }

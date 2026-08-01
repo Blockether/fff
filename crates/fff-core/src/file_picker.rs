@@ -362,6 +362,7 @@ impl FileSync {
     /// `None` when the dir table's overflow capacity is exhausted.
     fn find_or_add_dir(&mut self, dir_rel: &str) -> Option<u32> {
         if let Some(idx) = self.find_dir_index(dir_rel) {
+            self.revive_dir(idx as u32);
             return Some(idx as u32);
         }
 
@@ -1603,6 +1604,20 @@ impl FilePicker {
     /// If this function returns `None` it means that picker is in the invalid state, or the capacity
     /// of index is exhausted and a new rescan needs to be triggered.
     #[tracing::instrument(skip(self),level = Level::DEBUG)]
+    /// Record a directory created by the watcher, including an empty one.
+    /// The directory table stores canonical relative paths with a trailing `/`.
+    pub(crate) fn handle_directory_create(&mut self, path: impl AsRef<Path> + Debug) -> bool {
+        let Some(relative_path) = self.to_relative_path(path.as_ref()) else {
+            return false;
+        };
+        if relative_path.is_empty() {
+            return false;
+        }
+        self.sync_data
+            .find_or_add_dir(&format!("{relative_path}/"))
+            .is_some()
+    }
+
     pub fn handle_create_or_modify(&mut self, path: impl AsRef<Path> + Debug) -> Option<&FileItem> {
         let path = path.as_ref();
 
@@ -2034,6 +2049,7 @@ impl FileSync {
     /// git status computation. This avoids blocking on `git status` which can
     /// take 10+ seconds on very large repos (e.g. chromium).
     #[tracing::instrument(skip_all, name = "walk_filesystem", level = Level::INFO)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn walk_filesystem(
         base_path: &Path,
         git_workdir: Option<PathBuf>,
@@ -2062,6 +2078,7 @@ impl FileSync {
         )?;
         let ignore_rules = walk_output.ignore_rules.take().map(Arc::new);
         let mut pairs = walk_output.pairs;
+        let mut dir_paths = walk_output.dirs;
 
         // Sort by (dir_part, filename). This groups files by their directory
         // into contiguous runs so the linear dir-extraction pass below can
@@ -2076,7 +2093,7 @@ impl FileSync {
         });
 
         let mut builder = crate::simd_path::ChunkedPathStoreBuilder::new(pairs.len());
-        let dirs = populates_dirs_files_chunked_storage(&mut pairs, &mut builder);
+        let dirs = populates_dirs_files_chunked_storage(&mut pairs, &mut dir_paths, &mut builder);
 
         let mut files: Vec<FileItem> = pairs.into_iter().map(|(file, _)| file).collect();
         let chunked_paths = builder.finish();
@@ -2198,43 +2215,51 @@ pub(crate) fn warmup_mmaps(
 
 /// This does both thing (yes sorry all the OOP morons)
 /// in one go: populates files chunked storage and creates new directories
-fn populates_dirs_files_chunked_storage<'a>(
-    pairs: &'a mut [(FileItem, String)],
+fn populates_dirs_files_chunked_storage(
+    pairs: &mut [(FileItem, String)],
+    dir_paths: &mut Vec<String>,
     chunk_storage: &mut crate::simd_path::ChunkedPathStoreBuilder,
 ) -> Vec<DirItem> {
-    let mut dirs: Vec<DirItem> = Vec::new();
+    // The walkers report all accepted directories, including empty directories.
+    // File parents are included too to retain the root-dir entry and to make
+    // watcher/file updates robust if a backend omitted a parent.
+    dir_paths.extend(
+        pairs
+            .iter()
+            .map(|(file, rel)| rel[..file.path.filename_offset as usize].to_owned()),
+    );
+    dir_paths.sort_unstable();
+    dir_paths.dedup();
 
-    let mut prev_dir: &'a str = "";
-    let mut prev_dir_valid = false;
-    let mut current_dir_idx: u32 = 0;
+    let dir_indices: std::collections::HashMap<&str, u32> = dir_paths
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| (path.as_str(), idx as u32))
+        .collect();
+    let mut dirs = Vec::with_capacity(dir_paths.len());
+
+    for dir_part in dir_paths.iter() {
+        let dir_string = chunk_storage.add_dir_immediate(dir_part);
+
+        // Compute last-segment offset: for "src/components/" -> 4 (points to "components/")
+        let last_seg = if dir_part.is_empty() {
+            0
+        } else {
+            let trimmed = dir_part.trim_end_matches(std::path::is_separator);
+            trimmed
+                .rfind(std::path::is_separator)
+                .map(|i| i + 1)
+                .unwrap_or(0) as u16
+        };
+        dirs.push(DirItem::new(dir_string, last_seg));
+    }
 
     for (file, rel) in pairs.iter_mut() {
-        let rel: &'a str = rel;
-        let dir_part: &'a str = &rel[..file.path.filename_offset as usize];
-
-        if !prev_dir_valid || prev_dir != dir_part {
-            let dir_string = chunk_storage.add_dir_immediate(dir_part);
-
-            // Compute last-segment offset: for "src/components/" -> 4 (points to "components/")
-            let last_seg = if dir_part.is_empty() {
-                0
-            } else {
-                let trimmed = dir_part.trim_end_matches(std::path::is_separator);
-                trimmed
-                    .rfind(std::path::is_separator)
-                    .map(|i| i + 1)
-                    .unwrap_or(0) as u16
-            };
-
-            dirs.push(DirItem::new(dir_string, last_seg));
-            current_dir_idx = (dirs.len() - 1) as u32;
-
-            prev_dir = dir_part;
-            prev_dir_valid = true;
-        }
-
+        let dir_part = &rel[..file.path.filename_offset as usize];
         file.path = chunk_storage.add_file_immediate(rel, file.path.filename_offset);
-        file.parent_dir_index = current_dir_idx;
+        file.parent_dir_index = *dir_indices
+            .get(dir_part)
+            .expect("every file parent is added to the directory table");
     }
 
     dirs

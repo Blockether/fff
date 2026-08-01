@@ -20,6 +20,9 @@ pub(crate) use ripgrep::walk_collect_files;
 
 pub(crate) struct WalkOutput {
     pub(crate) pairs: Vec<(FileItem, String)>,
+    /// Every non-root directory accepted by the walker, including empty ones.
+    /// Paths are canonical, relative, and end in `/`.
+    pub(crate) dirs: Vec<String>,
     pub(crate) ignore_rules: Option<WalkIgnoreRules>,
 }
 
@@ -105,6 +108,8 @@ mod tests {
 
         let mut names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
         names.sort();
+        let mut dirs = out.dirs;
+        dirs.sort();
 
         assert!(names.contains(&"Cargo.toml".to_string()));
         assert!(names.iter().any(|n| n.ends_with("main.rs")));
@@ -112,6 +117,9 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("target")));
         assert!(!names.iter().any(|n| n.ends_with(".log")));
         assert!(!names.iter().any(|n| n.contains(".git/")));
+        assert!(dirs.contains(&"src/".to_string()));
+        assert!(!dirs.iter().any(|dir| dir.contains("target/")));
+        assert!(!dirs.iter().any(|dir| dir.contains(".git/")));
         assert_eq!(counter.load(Ordering::Relaxed), names.len());
     }
 
