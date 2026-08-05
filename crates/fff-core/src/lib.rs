@@ -129,6 +129,11 @@ pub mod log;
 /// Various path utils might be handy for you to work with fff paths
 pub mod path_utils;
 
+/// Stateless, bounded-depth, ignore-aware listing of ONE directory —
+/// including a filesystem root or a home directory, which indexing refuses.
+pub mod list;
+pub use list::{ListEntry, ListOptions, list_directory};
+
 /// Core data types shared across the crate.
 pub mod types;
 pub use types::*;

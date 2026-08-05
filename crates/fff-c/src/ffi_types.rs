@@ -7,7 +7,7 @@ use std::ptr;
 use fff::file_picker::FilePicker;
 use fff::git::format_git_status;
 use fff::{
-    DirItem, DirSearchResult, FileItem, GrepMatch, GrepResult, Location, MixedItemRef,
+    DirItem, DirSearchResult, FileItem, GrepMatch, GrepResult, ListEntry, Location, MixedItemRef,
     MixedSearchResult, Score, SearchResult,
 };
 
@@ -799,6 +799,75 @@ impl From<fff::file_picker::ScanProgress> for FffScanProgress {
             is_watcher_ready: p.is_watcher_ready,
             is_warmup_complete: p.is_warmup_complete,
         }
+    }
+}
+
+/// One entry of a directory listing returned by `fff_list_directory`. Strings
+/// are owned by the parent `FffListResult`; free everything with
+/// `fff_free_list_result`.
+#[repr(C)]
+pub struct FffListItem {
+    /// `/`-separated path relative to the listed directory.
+    pub relative_path: *mut c_char,
+    /// Last path segment.
+    pub name: *mut c_char,
+    /// `1` for an immediate child.
+    pub depth: u32,
+    /// True for a directory, including a symlink pointing at one.
+    pub is_dir: bool,
+    /// Bytes for files, `0` for directories or when unknown.
+    pub size: u64,
+    /// Modification time in whole seconds since the Unix epoch, `0` when unknown.
+    pub modified: u64,
+}
+
+impl FffListItem {
+    pub fn from_entry(entry: &ListEntry) -> Self {
+        FffListItem {
+            relative_path: cstring_new(&entry.relative_path),
+            name: cstring_new(&entry.name),
+            depth: entry.depth as u32,
+            is_dir: entry.is_dir,
+            size: entry.size,
+            modified: entry.modified,
+        }
+    }
+
+    /// ## Safety
+    /// All string pointers must have been allocated by the rust side
+    pub unsafe fn free_strings(&mut self) {
+        unsafe {
+            if !self.relative_path.is_null() {
+                drop(CString::from_raw(self.relative_path));
+            }
+            if !self.name.is_null() {
+                drop(CString::from_raw(self.name));
+            }
+        }
+    }
+}
+
+/// Directory listing returned by `fff_list_directory`;
+/// free with `fff_free_list_result`.
+#[repr(C)]
+pub struct FffListResult {
+    /// Heap array of `FffListItem` (length = `count`), sorted by relative path.
+    pub items: *mut FffListItem,
+    /// Number of items in the array.
+    pub count: u32,
+}
+
+impl FffListResult {
+    /// Convert core [`ListEntry`]s into a heap-allocated `FffListResult`.
+    pub fn from_entries(entries: &[ListEntry]) -> *mut Self {
+        let items: Vec<FffListItem> = entries.iter().map(FffListItem::from_entry).collect();
+        let count = items.len() as u32;
+        let (items_ptr, _) = vec_to_raw(items);
+
+        Box::into_raw(Box::new(FffListResult {
+            items: items_ptr,
+            count,
+        }))
     }
 }
 

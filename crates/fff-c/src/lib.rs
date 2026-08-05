@@ -27,8 +27,8 @@ use fff::{DbHealthChecker, FFFMode, FuzzySearchOptions, PaginationArgs, QueryPar
 use fff::{SharedFilePicker, SharedFrecency};
 use ffi_types::{
     FFF_CREATE_OPTIONS_VERSION, FffCreateOptions, FffDirItem, FffDirSearchResult, FffFileItem,
-    FffGrepMatch, FffGrepResult, FffMixedItem, FffMixedSearchResult, FffResult, FffScanProgress,
-    FffScore, FffSearchResult,
+    FffGrepMatch, FffGrepResult, FffListItem, FffListResult, FffMixedItem, FffMixedSearchResult,
+    FffResult, FffScanProgress, FffScore, FffSearchResult,
 };
 
 /// Opaque handle holding all per-instance state; freed by `fff_destroy`.
@@ -554,6 +554,45 @@ pub unsafe extern "C" fn fff_search_directories(
 
     let dir_result = FffDirSearchResult::from_core(&results, picker);
     FffResult::ok_handle(dir_result as *mut c_void)
+}
+
+/// List ONE directory, without indexing anything.
+///
+/// This is the answer to "what is in this directory", and unlike
+/// `fff_create_instance` it works everywhere — including a filesystem root or
+/// a home directory, which a picker refuses to index. Ignore files and cache
+/// directories are honored exactly as in a walk.
+///
+/// `max_depth` 0 picks the default (1 = the immediate children).
+///
+/// Returns a `FffResult` whose handle is a `FffListResult`, freed with
+/// `fff_free_list_result`.
+///
+/// ## Safety
+/// * `path` must be a valid null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_directory(
+    path: *const c_char,
+    max_depth: u32,
+    include_hidden: bool,
+    respect_ignore_files: bool,
+    follow_symlinks: bool,
+) -> *mut FffResult {
+    let Some(path_str) = (unsafe { cstr_to_str(path) }) else {
+        return FffResult::err("Path is null or invalid UTF-8");
+    };
+
+    let options = fff::ListOptions {
+        max_depth: default_u32(max_depth, 1) as usize,
+        include_hidden,
+        respect_ignore_files,
+        follow_symlinks,
+    };
+
+    match fff::list_directory(std::path::Path::new(path_str), &options) {
+        Ok(entries) => FffResult::ok_handle(FffListResult::from_entries(&entries) as *mut c_void),
+        Err(error) => FffResult::err(&error.to_string()),
+    }
 }
 
 /// Perform a mixed fuzzy search across both files and directories.
@@ -1594,6 +1633,53 @@ pub unsafe extern "C" fn fff_dir_search_result_get_score(
         return std::ptr::null();
     }
     unsafe { result.scores.add(index as usize) }
+}
+
+// ---------------------------------------------------------------------------
+// Directory listing: free and accessor functions
+// ---------------------------------------------------------------------------
+
+/// Free a directory listing returned by `fff_list_directory`.
+///
+/// ## Safety
+/// `result` must be a valid pointer previously returned via `FffResult.handle`
+/// from `fff_list_directory`, or null (no-op).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_free_list_result(result: *mut FffListResult) {
+    if result.is_null() {
+        return;
+    }
+
+    unsafe {
+        let result = Box::from_raw(result);
+        let count = result.count as usize;
+
+        if !result.items.is_null() {
+            let mut items = Vec::from_raw_parts(result.items, count, count);
+            for item in &mut items {
+                item.free_strings();
+            }
+        }
+    }
+}
+
+/// Get a pointer to the `index`-th `FffListItem` in a directory listing.
+///
+/// ## Safety
+/// `result` must be a valid `FffListResult` pointer from `fff_list_directory`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_result_get_item(
+    result: *const FffListResult,
+    index: u32,
+) -> *const FffListItem {
+    if result.is_null() {
+        return std::ptr::null();
+    }
+    let result = unsafe { &*result };
+    if index >= result.count || result.items.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { result.items.add(index as usize) }
 }
 
 // ---------------------------------------------------------------------------

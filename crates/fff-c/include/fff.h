@@ -370,6 +370,53 @@ typedef struct FffDirSearchResult {
 } FffDirSearchResult;
 
 /**
+ * One entry of a directory listing returned by `fff_list_directory`. Strings
+ * are owned by the parent `FffListResult`; free everything with
+ * `fff_free_list_result`.
+ */
+typedef struct FffListItem {
+  /**
+   * `/`-separated path relative to the listed directory.
+   */
+  char *relative_path;
+  /**
+   * Last path segment.
+   */
+  char *name;
+  /**
+   * `1` for an immediate child.
+   */
+  uint32_t depth;
+  /**
+   * True for a directory, including a symlink pointing at one.
+   */
+  bool is_dir;
+  /**
+   * Bytes for files, `0` for directories or when unknown.
+   */
+  uint64_t size;
+  /**
+   * Modification time in whole seconds since the Unix epoch, `0` when unknown.
+   */
+  uint64_t modified;
+} FffListItem;
+
+/**
+ * Directory listing returned by `fff_list_directory`;
+ * free with `fff_free_list_result`.
+ */
+typedef struct FffListResult {
+  /**
+   * Heap array of `FffListItem` (length = `count`), sorted by relative path.
+   */
+  struct FffListItem *items;
+  /**
+   * Number of items in the array.
+   */
+  uint32_t count;
+} FffListResult;
+
+/**
  * A single item in a mixed (files + directories) search result.
  * `item_type`: 0 = file, 1 = directory. Strings are owned by the parent
  * `FffMixedSearchResult`.
@@ -618,6 +665,28 @@ struct FffResult *fff_search_directories(void *fff_handle,
                                          uint32_t max_threads,
                                          uint32_t page_index,
                                          uint32_t page_size);
+
+/**
+ * List ONE directory, without indexing anything.
+ *
+ * This is the answer to "what is in this directory", and unlike
+ * `fff_create_instance` it works everywhere — including a filesystem root or
+ * a home directory, which a picker refuses to index. Ignore files and cache
+ * directories are honored exactly as in a walk.
+ *
+ * `max_depth` 0 picks the default (1 = the immediate children).
+ *
+ * Returns a `FffResult` whose handle is a `FffListResult`, freed with
+ * `fff_free_list_result`.
+ *
+ * ## Safety
+ * * `path` must be a valid null-terminated UTF-8 string.
+ */
+struct FffResult *fff_list_directory(const char *path,
+                                     uint32_t max_depth,
+                                     bool include_hidden,
+                                     bool respect_ignore_files,
+                                     bool follow_symlinks);
 
 /**
  * Perform a mixed fuzzy search across both files and directories.
@@ -908,6 +977,24 @@ const struct FffDirItem *fff_dir_search_result_get_item(const struct FffDirSearc
  */
 const struct FffScore *fff_dir_search_result_get_score(const struct FffDirSearchResult *result,
                                                        uint32_t index);
+
+/**
+ * Free a directory listing returned by `fff_list_directory`.
+ *
+ * ## Safety
+ * `result` must be a valid pointer previously returned via `FffResult.handle`
+ * from `fff_list_directory`, or null (no-op).
+ */
+void fff_free_list_result(struct FffListResult *result);
+
+/**
+ * Get a pointer to the `index`-th `FffListItem` in a directory listing.
+ *
+ * ## Safety
+ * `result` must be a valid `FffListResult` pointer from `fff_list_directory`.
+ */
+const struct FffListItem *fff_list_result_get_item(const struct FffListResult *result,
+                                                   uint32_t index);
 
 /**
  * Free a mixed search result returned by `fff_search_mixed`.
@@ -1469,6 +1556,66 @@ uint32_t fff_mixed_search_result_get_total_files(const struct FffMixedSearchResu
  * `result` must be a valid `FffMixedSearchResult` pointer or null.
  */
 uint32_t fff_mixed_search_result_get_total_dirs(const struct FffMixedSearchResult *result);
+
+/**
+ * Number of listed entries; `0` if `result` is null.
+ *
+ * # Safety
+ * `result` must be a valid `FffListResult` pointer or null.
+ */
+uint32_t fff_list_result_get_count(const struct FffListResult *result);
+
+/**
+ * Path of a listed entry, relative to the listed directory; null if `item` is
+ * null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffListItem` pointer or null.
+ */
+const char *fff_list_item_get_relative_path(const struct FffListItem *item);
+
+/**
+ * Last path segment of a listed entry; null if `item` is null. Do not free.
+ *
+ * # Safety
+ * `item` must be a valid `FffListItem` pointer or null.
+ */
+const char *fff_list_item_get_name(const struct FffListItem *item);
+
+/**
+ * Depth of a listed entry below the listed directory (`1` for an immediate
+ * child); `0` if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffListItem` pointer or null.
+ */
+uint32_t fff_list_item_get_depth(const struct FffListItem *item);
+
+/**
+ * Whether a listed entry is a directory (a symlink counts as what it points
+ * at); false if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffListItem` pointer or null.
+ */
+bool fff_list_item_get_is_dir(const struct FffListItem *item);
+
+/**
+ * Size in bytes of a listed file (`0` for directories); `0` if `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffListItem` pointer or null.
+ */
+uint64_t fff_list_item_get_size(const struct FffListItem *item);
+
+/**
+ * Modification time of a listed entry in seconds since the Unix epoch; `0` if
+ * unknown or `item` is null.
+ *
+ * # Safety
+ * `item` must be a valid `FffListItem` pointer or null.
+ */
+uint64_t fff_list_item_get_modified(const struct FffListItem *item);
 
 /**
  * Register the instance-wide watch callback used by all `fff_watch`

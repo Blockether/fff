@@ -878,6 +878,103 @@ pub unsafe extern "C" fn fff_mixed_search_result_get_total_dirs(
     unsafe { (*result).total_dirs }
 }
 
+/// Number of listed entries; `0` if `result` is null.
+///
+/// # Safety
+/// `result` must be a valid `FffListResult` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_result_get_count(
+    result: *const crate::ffi_types::FffListResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { (*result).count }
+}
+
+/// Path of a listed entry, relative to the listed directory; null if `item` is
+/// null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffListItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_item_get_relative_path(
+    item: *const crate::ffi_types::FffListItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).relative_path }
+}
+
+/// Last path segment of a listed entry; null if `item` is null. Do not free.
+///
+/// # Safety
+/// `item` must be a valid `FffListItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_item_get_name(
+    item: *const crate::ffi_types::FffListItem,
+) -> *const c_char {
+    if item.is_null() {
+        return ptr::null();
+    }
+    unsafe { (*item).name }
+}
+
+/// Depth of a listed entry below the listed directory (`1` for an immediate
+/// child); `0` if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffListItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_item_get_depth(
+    item: *const crate::ffi_types::FffListItem,
+) -> u32 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).depth }
+}
+
+/// Whether a listed entry is a directory (a symlink counts as what it points
+/// at); false if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffListItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_item_get_is_dir(
+    item: *const crate::ffi_types::FffListItem,
+) -> bool {
+    !item.is_null() && unsafe { (*item).is_dir }
+}
+
+/// Size in bytes of a listed file (`0` for directories); `0` if `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffListItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_item_get_size(item: *const crate::ffi_types::FffListItem) -> u64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).size }
+}
+
+/// Modification time of a listed entry in seconds since the Unix epoch; `0` if
+/// unknown or `item` is null.
+///
+/// # Safety
+/// `item` must be a valid `FffListItem` pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_item_get_modified(
+    item: *const crate::ffi_types::FffListItem,
+) -> u64 {
+    if item.is_null() {
+        return 0;
+    }
+    unsafe { (*item).modified }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
