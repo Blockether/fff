@@ -1,4 +1,6 @@
-use crate::ignore::{CompiledIgnoreOverlay, is_cache_dir_name, non_git_repo_overrides};
+use crate::ignore::{
+    CompiledIgnoreOverlay, has_cache_dir_component, is_cache_dir_name, non_git_repo_overrides,
+};
 use crate::types::FileItem;
 use crate::walk::WalkOutput;
 use crate::watch::is_git_file;
@@ -108,7 +110,10 @@ fn collect_unignored(
     let mut seen_roots: HashSet<&Path> = HashSet::new();
 
     for root in roots {
-        if !seen_roots.insert(root.as_path()) || !root.exists() {
+        let is_cache_root = root
+            .strip_prefix(base_path)
+            .is_ok_and(has_cache_dir_component);
+        if is_cache_root || !seen_roots.insert(root.as_path()) || !root.exists() {
             continue;
         }
 

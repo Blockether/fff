@@ -73,6 +73,8 @@ impl WalkIgnoreRules {
 #[cfg(test)]
 mod tests {
     use super::walk_collect_files;
+    #[cfg(feature = "ripgrep")]
+    use crate::ignore::CACHE_DIRS;
     use crate::ignore::IgnoreOverlay;
     use std::fs;
     use std::sync::Arc;
@@ -211,6 +213,7 @@ mod tests {
 
     // `.rgignore` is the one ignore filename ripgrep's `ignore` crate does not
     // register on its own; the overlay opts it in per walk.
+    #[cfg(feature = "ripgrep")]
     #[test]
     fn honors_custom_ignore_filenames() {
         let dir = tempfile::tempdir().unwrap();
@@ -237,6 +240,7 @@ mod tests {
 
     // `exclude_globs` drop files the ignore files kept; `unignore_globs`
     // resurrect a subtree a .gitignore dropped (walker never descends it).
+    #[cfg(feature = "ripgrep")]
     #[test]
     fn applies_exclude_and_unignore_globs() {
         let dir = tempfile::tempdir().unwrap();
@@ -266,6 +270,92 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with("target/keep/a.txt")));
         assert!(!names.iter().any(|n| n.contains("target/skip")));
         assert!(!names.iter().any(|n| n.contains("secrets")));
+        assert_eq!(counter.load(Ordering::Relaxed), names.len());
+    }
+
+    #[cfg(feature = "ripgrep")]
+    #[test]
+    fn unignore_globs_do_not_reopen_cache_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+
+        let mut ignore_lines = String::new();
+        let mut unignore_globs = Vec::new();
+        for cache_dir in CACHE_DIRS {
+            fs::create_dir_all(root.join(cache_dir)).unwrap();
+            fs::create_dir_all(root.join("src").join(cache_dir)).unwrap();
+            fs::write(root.join(cache_dir).join("root.cache"), "cache").unwrap();
+            fs::write(
+                root.join("src").join(cache_dir).join("nested.cache"),
+                "cache",
+            )
+            .unwrap();
+            ignore_lines.push_str(&format!("{cache_dir}/\nsrc/{cache_dir}/\n"));
+            unignore_globs.push(format!("{cache_dir}/**"));
+            unignore_globs.push(format!("src/{cache_dir}/**"));
+        }
+        fs::write(root.join(".gitignore"), ignore_lines).unwrap();
+        fs::write(root.join("src/main.clj"), "source").unwrap();
+
+        let overlay = IgnoreOverlay {
+            unignore_globs,
+            ..Default::default()
+        }
+        .compile(root);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(root, true, false, true, &overlay, 1, &counter).unwrap();
+        let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+        let has_cache_component = |path: &str| {
+            std::path::Path::new(path).components().any(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|name| CACHE_DIRS.contains(&name))
+            })
+        };
+
+        assert!(names.iter().any(|name| name == "src/main.clj"));
+        assert!(
+            !names.iter().any(|name| has_cache_component(name)),
+            "cache files escaped pruning: {names:?}"
+        );
+        assert!(
+            !out.dirs.iter().any(|dir| has_cache_component(dir)),
+            "cache directories escaped pruning: {:?}",
+            out.dirs
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), names.len());
+    }
+
+    #[cfg(feature = "ripgrep")]
+    #[test]
+    fn unignore_globs_cannot_walk_above_base_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let base = root.join("project");
+        let outside = root.join("outside");
+        fs::create_dir_all(base.join(".git")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(base.join("main.rs"), "source").unwrap();
+        fs::write(outside.join("secret.txt"), "outside").unwrap();
+
+        let overlay = IgnoreOverlay {
+            unignore_globs: vec!["../outside/**".into()],
+            ..Default::default()
+        }
+        .compile(&base);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(&base, true, false, true, &overlay, 1, &counter).unwrap();
+        let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+
+        assert!(names.iter().any(|name| name == "main.rs"));
+        assert!(
+            names.iter().all(|name| !name.starts_with("../")),
+            "unignore walked outside the base path: {names:?}"
+        );
         assert_eq!(counter.load(Ordering::Relaxed), names.len());
     }
 }

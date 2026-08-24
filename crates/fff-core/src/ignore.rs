@@ -62,6 +62,16 @@ pub(crate) fn is_cache_dir_name(name: &str) -> bool {
     CACHE_DIRS.contains(&name)
 }
 
+/// True when a base-relative path enters an unconditionally pruned cache tree.
+pub(crate) fn has_cache_dir_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(is_cache_dir_name)
+    })
+}
+
 #[cfg(all(not(feature = "zlob"), feature = "ripgrep"))]
 pub(crate) fn non_git_repo_overrides(base_path: &Path) -> Option<ignore::overrides::Override> {
     use ignore::overrides::OverrideBuilder;
@@ -134,6 +144,7 @@ impl IgnoreOverlay {
 /// The literal directory prefix of a `.gitignore`-style pattern: every leading
 /// component up to the first one carrying a glob meta character. `**/vendored`
 /// yields `""` — "any directory might match", so the whole tree is reopened.
+#[cfg(any(feature = "ripgrep", test))]
 fn glob_static_prefix(pattern: &str) -> String {
     let pattern = pattern.trim_start_matches('/');
     let mut out: Vec<&str> = Vec::new();
@@ -149,6 +160,20 @@ fn glob_static_prefix(pattern: &str) -> String {
     out.join("/")
 }
 
+#[cfg(feature = "ripgrep")]
+fn unignore_root(base_path: &Path, pattern: &str) -> Option<std::path::PathBuf> {
+    let prefix = glob_static_prefix(pattern);
+    let relative = Path::new(&prefix);
+    relative
+        .components()
+        .all(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )
+        })
+        .then(|| base_path.join(relative))
+}
 #[cfg(feature = "ripgrep")]
 #[derive(Debug)]
 pub struct CompiledIgnoreOverlay {
@@ -184,7 +209,7 @@ impl CompiledIgnoreOverlay {
         let unignore_roots = overlay
             .unignore_globs
             .iter()
-            .map(|g| base_path.join(glob_static_prefix(g)))
+            .filter_map(|pattern| unignore_root(base_path, pattern))
             .collect();
 
         Self {
@@ -263,14 +288,6 @@ impl CompiledIgnoreOverlay {
 
     pub fn is_empty(&self) -> bool {
         self.overlay.is_empty()
-    }
-
-    pub(crate) fn custom_ignore_filenames(&self) -> &[String] {
-        &[]
-    }
-
-    pub(crate) fn unignore_roots(&self) -> &[std::path::PathBuf] {
-        &[]
     }
 
     pub(crate) fn is_excluded(&self, _rel: &Path, _is_dir: bool) -> bool {

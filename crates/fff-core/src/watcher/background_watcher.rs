@@ -819,15 +819,13 @@ impl<'a> IgnoreFilter<'a> {
     fn is_ignored(&self, path: &Path) -> bool {
         // Cache trees are pruned by the walk under BOTH ignore policies; the
         // watcher must agree or it re-adds what the walk deliberately dropped.
-        if path.components().any(|c| {
-            c.as_os_str()
-                .to_str()
-                .is_some_and(crate::ignore::is_cache_dir_name)
-        }) {
+        // Only inspect the base-relative path: a project may itself live below
+        // an ancestor named `.cache` or another cache-directory name.
+        let rel = path.strip_prefix(self.base_path).ok();
+        if rel.is_some_and(crate::ignore::has_cache_dir_component) {
             return true;
         }
         // The caller overlay outranks the ignore files in BOTH directions.
-        let rel = path.strip_prefix(self.base_path).ok();
         if let Some(rel) = rel {
             if self.overlay.is_excluded(rel, false) {
                 return true;
@@ -1049,5 +1047,22 @@ mod tests {
             &git_dir.join("index"),
             &None
         ));
+    }
+
+    #[test]
+    fn cache_named_ancestor_does_not_hide_watched_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".cache/project");
+        std::fs::create_dir_all(&base).unwrap();
+        let filter = IgnoreFilter::new(
+            &base,
+            None,
+            None,
+            false,
+            Arc::new(crate::ignore::IgnoreOverlay::default().compile(&base)),
+        );
+
+        assert!(!filter.is_ignored(&base.join("src/main.rs")));
+        assert!(filter.is_ignored(&base.join("src/.cache/state")));
     }
 }

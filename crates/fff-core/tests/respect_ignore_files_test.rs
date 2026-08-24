@@ -120,6 +120,7 @@ fn cache_dirs_stay_pruned_even_without_ignore_files() {
     );
 }
 
+#[cfg(feature = "ripgrep")]
 #[test]
 fn overlay_honors_custom_ignore_filename() {
     let tmp = TempDir::new().unwrap();
@@ -145,6 +146,7 @@ fn overlay_honors_custom_ignore_filename() {
     assert!(!paths.iter().any(|p| p == "generated/out.rs"), "{paths:?}");
 }
 
+#[cfg(feature = "ripgrep")]
 #[test]
 fn overlay_excludes_and_reincludes_paths() {
     let tmp = TempDir::new().unwrap();
@@ -176,6 +178,7 @@ fn overlay_excludes_and_reincludes_paths() {
 }
 
 // `exclude_globs` are absolute: they apply even with every ignore file off.
+#[cfg(feature = "ripgrep")]
 #[test]
 fn overlay_excludes_even_without_ignore_files() {
     let tmp = TempDir::new().unwrap();
