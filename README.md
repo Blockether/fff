@@ -4,11 +4,35 @@
   <i>A file search toolkit for humans and AI agents. Really fast.</i>
 </p>
 
-Typo-resistant path and content search, frecency-ranked file access, a background watcher, and a lightweight in-memory content index. Way faster than CLIs like ripgrep and fzf in any long-running process that searches more than once.
+Typo-resistant path and content search, frequency-ranked file access, a background watcher, and a lightweight in-memory content index. Way faster than CLIs like ripgrep and fzf in any long-running process that searches more than once.
 
 Powers file search in [opencode](http://github.com/anomalyco/opencode/), [nushell](https://github.com/nushell/nushell), and many more amazing projects!
 
 Originally started as [Neovim plugin](#neovim-plugin) people loved, but it turned out that plenty of AI harnesses and code editors need the same thing: accurate, fast file search as a library. That is what fff is.
+<p>
+<a href="https://trendshift.io/repositories/26711?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26711" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26711" alt="dmtrKovalenko%2Ffff | Trendshift" width="250" height="55"/></a>
+</p>
+
+---
+
+## Sponsors
+
+fff is MIT and open source forever. Development is supported by these companies:
+
+<table>
+  <tr>
+    <td align="center" width="110"><sub><b>💎<br>DIAMOND</b></sub></td>
+    <td align="center" width="420"><a href="https://anoma.ly"><img alt="Anomaly" src="./assets/sponsors/anomaly.png" width="400"></a></td>
+    <td><b><a href="https://anoma.ly">Anomaly</a></b><br><sub>The team behind <a href="https://opencode.ai">opencode</a>.</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>🥇<br>GOLD</b></sub></td>
+    <td align="center"><a href="https://mangoproxy.com/?utm_source=dmtrkovalenko&utm_medium=partner&utm_campaign=dmtrkovalenko_github"><img alt="Mango Proxy" src="./assets/sponsors/mango-proxy.png" width="280"></a></td>
+    <td><b><a href="https://mangoproxy.com/?utm_source=dmtrkovalenko&utm_medium=partner&utm_campaign=dmtrkovalenko_github">Mango Proxy</a></b><br><sub>Fast, secure proxies for all the needs.</sub></td>
+  </tr>
+</table>
+
+<sub>Use and enjoy fff? <a href="mailto:dmitriy@iusevimbtw.com">Become a sponsor to get your features/fixes the highest priority</a>.</sub>
 
 ---
 
@@ -34,7 +58,7 @@ curl -L https://dmtrkovalenko.dev/install-fff-mcp.sh | bash
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/dmtrKovalenko/fff.nvim/main/install-mcp.ps1 | iex
+irm https://raw.githubusercontent.com/dmtrKovalenko/fff/main/install-mcp.ps1 | iex
 ```
 
 The scripts live at [`install-mcp.sh`](./install-mcp.sh) and [`install-mcp.ps1`](./install-mcp.ps1) if you want to read them first. They print the exact wiring instructions for your client.
@@ -46,7 +70,7 @@ brew install dmtrKovalenko/fff/fff-mcp
 brew upgrade fff-mcp   # after new stable releases
 ```
 
-Formula lives in [`Formula/fff-mcp.rb`](./Formula/fff-mcp.rb) in this repo and is **auto-bumped on every stable release** (see `bump-homebrew-formula` in [`.github/workflows/release.yaml`](./.github/workflows/release.yaml)). Installs the prebuilt `fff-mcp` binary from [GitHub releases](https://github.com/dmtrKovalenko/fff.nvim/releases).
+Formula lives in [`Formula/fff-mcp.rb`](./Formula/fff-mcp.rb) in this repo and is **auto-bumped on every stable release** (see `bump-homebrew-formula` in [`.github/workflows/release.yaml`](./.github/workflows/release.yaml)). Installs the prebuilt `fff-mcp` binary from [GitHub releases](https://github.com/dmtrKovalenko/fff/releases).
 
 ### Codex setup
 
@@ -117,7 +141,7 @@ Three operating modes, switchable at runtime with `/fff-mode`:
 | `tools-only`             | Only tool injection. Keeps pi's native editor autocomplete.                       |
 | `override`               | Replaces pi's built-in `grep`, `find`, and `multi_grep` with FFF implementations. |
 
-Env vars: `PI_FFF_MODE`, `FFF_FRECENCY_DB`, `FFF_HISTORY_DB`. Flags: `--fff-mode`, `--fff-frecency-db`, `--fff-history-db`.
+Env vars: `PI_FFF_MODE`, `FFF_FRECENCY_DB`, `FFF_HISTORY_DB`. Flags: `--fff-mode`, `--fff-frecency-db`, `--fff-history-db`. The databases default to your existing fff.nvim ones when present, otherwise `~/.pi/agent/fff/`.
 
 ### Agent-facing tools
 
@@ -150,8 +174,9 @@ https://github.com/user-attachments/assets/5d0e1ce9-642c-4c44-aa88-01b05bb86abb
 #### lazy.nvim
 
 ```lua
+-- Package name changed from `fff.nvim` to `fff`. If you installed fff.nvim before, clean with `:Lazy clean`
 {
-  'dmtrKovalenko/fff.nvim',
+  'dmtrKovalenko/fff',
   build = function()
     -- downloads a prebuilt binary or falls back to cargo build
     require("fff.download").download_or_build_binary()
@@ -184,13 +209,14 @@ https://github.com/user-attachments/assets/5d0e1ce9-642c-4c44-aa88-01b05bb86abb
 #### vim.pack
 
 ```lua
-vim.pack.add({ 'https://github.com/dmtrKovalenko/fff.nvim' })
+-- Package name changed from `fff.nvim` to `fff`. If you installed fff.nvim before, clean with `:packdel fff.nvim`
+vim.pack.add({ 'https://github.com/dmtrKovalenko/fff' })
 
 vim.api.nvim_create_autocmd('PackChanged', {
   callback = function(ev)
     local name, kind = ev.data.spec.name, ev.data.kind
-    if name == 'fff.nvim' and (kind == 'install' or kind == 'update') then
-      if not ev.data.active then vim.cmd.packadd('fff.nvim') end
+    if name == 'fff' and (kind == 'install' or kind == 'update') then
+      if not ev.data.active then vim.cmd.packadd('fff') end
       require('fff.download').download_or_build_binary()
     end
   end,
@@ -272,6 +298,17 @@ Both `file_search` and `content_search` honour an optional `cwd` field. The firs
 - If the index is still warming up after a `change_indexing_directory`, you can pass `wait_for_index_ms = N` to block for up to `N` ms regardless of whether `cwd` triggered the swap. Pass `0` to skip waiting entirely (useful for fire-and-forget calls where partial results are acceptable).
 - Invalid or non-existent `cwd` paths return an empty result and emit an error via `vim.notify`.
 
+### Autocmds
+
+The picker fires `User` autocmds when it opens and closes. `FFFOpen` runs with the prompt window focused, `FFFClose` runs after every picker window is gone — so hide global UI, not window-local options of the picker itself:
+
+```lua
+vim.api.nvim_create_autocmd('User', {
+  pattern = { 'FFFOpen', 'FFFClose' },
+  callback = function(ev) vim.o.showtabline = ev.match == 'FFFOpen' and 0 or 2 end,
+})
+```
+
 ### Commands
 
 - `:FFFScan`. Rescan files.
@@ -288,12 +325,13 @@ Defaults are sensible. Override only what you care about.
 ```lua
 require('fff').setup({
   base_path = vim.fn.getcwd(),
-  prompt = '> ',
+  prompt = '🪿 ',
   title = 'FFFiles',
   max_results = 100,
   max_threads = 4,
   lazy_sync = true,
   prompt_vim_mode = false,
+  wrap_around = false, -- true to wrap the cursor around when moving past the first/last item
   follow_symlinks = false,
   -- Allow indexing the user's $HOME directory. Enabled by default.
   -- Disable if you strictly sure you don't want this, as it makes whole fff error hard
@@ -309,11 +347,23 @@ require('fff').setup({
     -- Border style for the picker windows. Leave unset (nil) to follow the
     -- global `vim.o.winborder`; set it to override fff's borders independently.
     border = nil, -- 'single' | 'double' | 'rounded' | 'solid' | 'shadow' | 'none'
+    -- border = {
+    --   { ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' },
+    --   { ' ', ' ', ' ', ' ', ' ' },
+    -- },
+
     flex = { size = 130, wrap = 'top' },
     min_list_height = 10, --  do not display anything except the list below this threshold
     show_scrollbar = true,
-    path_shorten_strategy = 'middle_number', -- 'middle_number' | 'middle' | 'end' | 'start'
+    path_shorten_strategy = 'middle', -- 'middle' | 'middle_number' | 'end' | 'start'
+    -- 'center' | 'top' | 'bottom' | 'left' | 'right' | 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right'
     anchor = 'center',
+    show_path_first = false, -- true renders results as `path/to/file` instead of `file path/to`
+  },
+  -- find_files specific rendering
+  file_picker = {
+    current_file_label = '(current)', -- virtual text marking the buffer the picker was opened from
+    fuzzy_query_highlighting = false, -- true to highlight fuzzy query matches, not just the literal query
   },
   preview = {
     enabled = true,
@@ -347,10 +397,17 @@ require('fff').setup({
     grep_jump_to_next_file = { '<C-A-n>', '<A-Down>' },
     grep_jump_to_prev_file = { '<C-A-p>', '<A-Up>' },
     cycle_previous_query = '<C-Up>',
+    cycle_forward_query = '<C-Down>',
+    -- unbound by default, wipes the whole input line
+    -- clear_query = '<C-u>', -- overrides preview_scroll_up in insert mode
     toggle_select = '<Tab>',
     send_to_quickfix = '<C-q>',
     focus_list = '<leader>l',
     focus_preview = '<leader>p',
+  },
+  -- extra keymaps for the picker input, keyed by mode, applied over the built-ins
+  mappings = {
+    -- i = { ['<A-BS>'] = function() vim.api.nvim_input('<C-w>') end },
   },
   frecency = {
     enabled = true,
@@ -364,9 +421,6 @@ require('fff').setup({
   },
   git = {
     status_text_color = false, -- true to color filenames by git status
-  },
-  file_picker = {
-    fuzzy_query_highlighting = false, -- true to highlight fuzzy query matches in file picker results
   },
   select = {
     -- Return winid to open the chosen file in, or nil to open in the original window
@@ -399,6 +453,7 @@ require('fff').setup({
     },
   },
   logging = {
+    enabled = true,
     -- logs will be written in a parent directory of this file path in files like
     -- `<stem>+<UTC-timestamp>+<pid>.<ext>`. Run :FFFOpenLog to open current one
     log_file = vim.fn.stdpath('log') .. '/fff.log',
@@ -558,7 +613,7 @@ const rustFiles = finder.value.glob("**/*.rs", { pageSize: 100 });
 finder.value.destroy();
 ```
 
-Every method returns a `Result<T>` (`{ ok: true, value } | { ok: false, error }`). Full type reference: [`packages/fff-node/src/types.ts`](./packages/fff-node/src/types.ts).
+Every method returns a `Result<T>` (`{ ok: true, value } | { ok: false, error }`). Full type reference: [`packages/fff-node/src/fff-api.ts`](./packages/fff-node/src/fff-api.ts).
 
 </details>
 
@@ -606,7 +661,7 @@ cargo build --release -p fff-c --features zlob
 
 The output is a `cdylib` (`libfff_c.so` / `libfff_c.dylib` / `fff_c.dll`). The header lives at [`crates/fff-c/include/fff.h`](./crates/fff-c/include/fff.h).
 
-Prebuilt binaries for every version, including every commit on main, are on the [releases page](https://github.com/dmtrKovalenko/fff.nvim/releases). The same binaries also ship inside the `@ff-labs/fff-bin-*` npm packages.
+Prebuilt binaries for every version, including every commit on main, are on the [releases page](https://github.com/dmtrKovalenko/fff/releases). The same binaries also ship inside the `@ff-labs/fff-bin-*` npm packages.
 
 ### Install
 
@@ -783,7 +838,7 @@ FFF is a file search library, not a CLI. Ripgrep and fzf are great tools, but th
 
 FFF keeps the index and the file cache resident in one long-lived process and exposes the same Rust core through four thin layers: a native crate (`fff-search`), a C library (`libfff_c`), a Node/Bun SDK (`@ff-labs/fff-node`), and an MCP server. You call `FileFinder.create()` once, then every subsequent search hits warm memory. On a 500k-file Chromium checkout, that is the difference between 3-9 **SECONDS** per ripgrep spawn and sub-10 ms per FFF query.
 
-Algorithm for fuzzy matching is much more comprehensive than fzf's algorithm it is **typo-resistant** and we provide a query language with additional constraint parsing for prefiltering e.g. "\*.rs !test/ shcema" is a perfectly valid query for fff, but fzf wouldn't find anything even for a single typo in "shcema".
+Algorithm for fuzzy matching is much more comprehensive than fzf's algorithm. It is **typo-resistant** and we provide a query language with additional constraint parsing for prefiltering e.g. "\*.rs !test/ shcema" is a perfectly valid query for fff, but fzf wouldn't find anything even for a single typo in "shcema".
 
 ### Why a programmatic API matters
 

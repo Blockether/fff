@@ -2,6 +2,7 @@ use crate::constants::MAX_OVERFLOW_FILES;
 use crate::error::Error;
 use crate::file_picker::FFFMode;
 use crate::git_status_worker::GitStatusWorker;
+use crate::rescan_stats::RescanReason;
 use crate::shared::{SharedFilePicker, SharedFrecency};
 use crate::sort_buffer::sort_with_buffer;
 use crate::watch::{RawWatchEvent, WatchEventKind};
@@ -22,8 +23,17 @@ type Debouncer = notify_debouncer_full::Debouncer<notify::RecommendedWatcher, No
 /// are fully joined before `stop()` / `Drop` returns.
 pub struct BackgroundWatcher {
     debouncer: Arc<Mutex<Option<Debouncer>>>,
-    watch_tx: Option<mpsc::Sender<PathBuf>>,
+    watch_tx: Option<mpsc::Sender<WatchTask>>,
     owner_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+enum WatchTask {
+    /// Only subscribe to a specific path, this is happening when we did rescun and have to update
+    /// the watcher only
+    Subscribe(PathBuf),
+    /// This is requires a separate walk of the new directory copies or created within a scan
+    /// window because it might contain subdirectories we have to walk, prune, and add to index
+    IndexNewDir(PathBuf),
 }
 
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(50);
@@ -77,7 +87,7 @@ impl BackgroundWatcher {
         // spare watcher (configurable by the user, usually 100k - 1m)
         let use_recursive = cfg!(any(target_os = "macos", target_os = "windows"));
 
-        let (watch_tx, watch_rx) = mpsc::channel::<PathBuf>();
+        let (watch_tx, watch_rx) = mpsc::channel::<WatchTask>();
         let watch_tx_for_debouncer = watch_tx.clone();
 
         let owner_weak_picker = shared_picker.weaken();
@@ -108,48 +118,46 @@ impl BackgroundWatcher {
             .name("fff-watcher-own".into())
             .spawn(move || {
                 let _g = owner_span.enter();
-                while let Ok(dir) = watch_rx.recv() {
+                while let Ok(task) = watch_rx.recv() {
                     // if the picker is dropped we do need to exit the loop
                     let Some(strong_picker) = owner_weak_picker.upgrade() else {
                         break;
                     };
 
-                    // Only inotify (Linux) has no kernel-level recursion, so
-                    // it's the only platform that needs a per-subdir watch to
-                    // be registered at runtime. macOS FSEvents and Windows
-                    // ReadDirectoryChangesW are already watching recursively
-                    // from the base path (see `create_debouncer`), and
-                    // registering a second overlapping stream there produces
-                    // duplicate/out-of-order events.
-                    #[cfg(target_os = "linux")]
-                    {
-                        // Register the new directory with the debouncer, then
-                        // drop the mutex BEFORE doing picker-side work — see
-                        // the comment on `BackgroundWatcher::stop` for the
-                        // lock-ordering rationale.
-                        let mut guard = owner_debouncer.lock();
-                        let Some(debouncer) = guard.as_mut() else {
-                            break;
-                        };
+                    let (dir, is_new_dir) = match task {
+                        WatchTask::Subscribe(dir) => (dir, false),
+                        WatchTask::IndexNewDir(dir) => (dir, true),
+                    };
 
-                        if let Err(e) = debouncer.watch(&dir, RecursiveMode::NonRecursive) {
-                            warn!(
-                                ?e,
-                                dir = %dir.display(),
-                                "Failed to init watcher for new directory"
-                            );
-                        }
+                    // Register the watch BEFORE walking so files created mid-walk still handled
+                    #[cfg(target_os = "linux")]
+                    if !watch_dirs_nonrecursive(&owner_debouncer, std::iter::once(dir.as_path())) {
+                        break;
                     }
 
-                    track_files_from_new_directories(
-                        &dir,
-                        &strong_picker,
-                        &owner_git_workdir,
-                        &owner_git_worker,
-                    );
+                    if is_new_dir {
+                        // need to call this on every platform to add subdirectories from the
+                        // new folders to the picker, but on linux we have to handle the subdirs
+                        let subdirs = index_new_directory(
+                            &dir,
+                            &strong_picker,
+                            &owner_git_workdir,
+                            &owner_git_worker,
+                        );
 
-                    // Transient strong ref drops here, back
-                    // to weak-only before the next `recv()`.
+                        // on linux we manually resubscribe for new inodes
+                        #[cfg(target_os = "linux")]
+                        if !watch_dirs_nonrecursive(
+                            &owner_debouncer,
+                            subdirs.iter().map(|p| p.as_path()),
+                        ) {
+                            break;
+                        }
+
+                        drop(subdirs); // need it cause subdirs is unused on non-linux target'
+                    }
+
+                    drop(strong_picker);
                 }
 
                 tracing::info!("Background watcher is stopped");
@@ -171,7 +179,7 @@ impl BackgroundWatcher {
         shared_frecency: SharedFrecency,
         mode: FFFMode,
         use_recursive: bool,
-        watch_tx: mpsc::Sender<PathBuf>,
+        watch_tx: mpsc::Sender<WatchTask>,
         git_status_worker: Arc<GitStatusWorker>,
     ) -> Result<Debouncer, Error> {
         let config = Config::default()
@@ -206,7 +214,7 @@ impl BackgroundWatcher {
 
                         // every new directory created has to be reflected in the picker state
                         for dir in new_dirs {
-                            if let Err(e) = watch_tx.send(dir) {
+                            if let Err(e) = watch_tx.send(WatchTask::IndexNewDir(dir)) {
                                 error!(?e, "Failed to send directory update error");
                             }
                         }
@@ -304,7 +312,7 @@ impl BackgroundWatcher {
 
     pub(crate) fn request_watch_dir(&self, dir: PathBuf) -> bool {
         match self.watch_tx.as_ref() {
-            Some(tx) => tx.send(dir).is_ok(),
+            Some(tx) => tx.send(WatchTask::Subscribe(dir)).is_ok(),
             None => false,
         }
     }
@@ -317,7 +325,7 @@ impl Drop for BackgroundWatcher {
 }
 
 #[tracing::instrument(name = "fs_events", skip(events, shared_picker, shared_frecency, git_status_worker), level = Level::DEBUG)]
-fn handle_debounced_events(
+pub(crate) fn handle_debounced_events(
     mode: FFFMode,
     events: Vec<DebouncedEvent>,
     base_path: &Path,
@@ -350,8 +358,8 @@ fn handle_debounced_events(
         respect_ignore_files,
         overlay,
     );
-    let mut need_full_rescan = false;
     let mut need_full_git_rescan = false;
+    let mut batch_overflow_attempted = false;
     let mut paths_to_remove = Vec::new();
     let mut dirs_to_remove: Vec<PathBuf> = Vec::new();
     let mut paths_to_add_or_modify = Vec::new();
@@ -360,6 +368,21 @@ fn handle_debounced_events(
 
     let watch_registry = shared_picker.watch_registry();
     let need_events_propagation = watch_registry.is_active();
+
+    let try_trigger_full_rescan = |reason: RescanReason| -> bool {
+        match shared_picker.trigger_full_rescan_with_reason(shared_frecency, reason) {
+            Ok(true) => {
+                warn!(%reason, "Triggering full rescan");
+                watch_registry.dispatch_rescan(base_path);
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                error!(%reason, "Failed to trigger full rescan: {:?}", e);
+                false
+            }
+        }
+    };
 
     for debounced_event in &events {
         // It is very important to not react to the access errors because we inevitably
@@ -378,22 +401,19 @@ fn handle_debounced_events(
         // When macOS FSEvents (or other backends) overflow their event buffer, the kernel
         // drops individual events and emits a rescan flag telling us to re-scan the subtree
         if debounced_event.event.need_rescan() {
-            if debounced_event.event.paths.len() < 16 // this should be usually one event
+            let small_and_known = debounced_event.event.paths.len() < 16 // this should be usually one event
                 && debounced_event
                     .paths
                     .iter()
                     // but we are smart enough and not falling into the paths
-                    .all(|p| !p.is_dir() && !filter.is_ignored(p))
-            {
-                break;
+                    .all(|p| !p.is_dir() && !filter.is_ignored(p));
+
+            if !small_and_known && try_trigger_full_rescan(RescanReason::KernelEventLoss) {
+                return Vec::new();
             }
 
-            warn!(
-                "Received rescan event for paths {:?}, triggering full rescan",
-                debounced_event.event.paths
-            );
-            need_full_rescan = true;
-            break;
+            // Small batches and throttled rescans fall through: the listed
+            // paths are still applied incrementally below.
         }
 
         tracing::debug!(event = ?debounced_event.event, "Processing FS event");
@@ -402,13 +422,24 @@ fn handle_debounced_events(
                 path.file_name().and_then(|f| f.to_str()),
                 Some(".ignore") | Some(".gitignore")
             ) {
+                if path
+                    .parent()
+                    .is_some_and(|parent| filter.is_ignored(parent))
+                {
+                    continue;
+                }
+
                 info!(
                     "Detected change in ignore definition file: {}",
                     path.display()
                 );
 
-                need_full_rescan = true;
-                break;
+                if try_trigger_full_rescan(RescanReason::IgnoreFileChanged) {
+                    return Vec::new();
+                }
+
+                // Throttled: fall through so the ignore file itself stays
+                // indexed; the stale rules heal on the next admitted rescan.
             }
 
             if is_dotgit_change_affecting_status(path, &repo) {
@@ -470,29 +501,18 @@ fn handle_debounced_events(
         }
 
         affected_paths_count += debounced_event.event.paths.len();
-        if affected_paths_count > MAX_OVERFLOW_FILES {
+        if !batch_overflow_attempted && affected_paths_count > MAX_OVERFLOW_FILES * 4 {
+            batch_overflow_attempted = true;
             warn!(
                 ?affected_paths_count,
-                max = MAX_OVERFLOW_FILES,
+                max = MAX_OVERFLOW_FILES * 4,
                 "Too many affected paths in a single batch, triggering full rescan",
             );
 
-            need_full_rescan = true;
-            break;
+            if try_trigger_full_rescan(RescanReason::EventBatchOverflow) {
+                return Vec::new();
+            }
         }
-
-        if need_full_rescan {
-            break;
-        }
-    }
-
-    if need_full_rescan {
-        info!(?affected_paths_count, "Triggering full rescan");
-        watch_registry.dispatch_rescan(base_path);
-        if let Err(e) = shared_picker.trigger_full_rescan_async(shared_frecency) {
-            error!("Failed to trigger full rescan: {:?}", e);
-        }
-        return Vec::new();
     }
 
     // It's important to get the allocated sort
@@ -519,7 +539,7 @@ fn handle_debounced_events(
     }
 
     let mut files_to_update_git_status = Vec::new();
-    let mut need_full_rescan = false;
+    let mut index_update_rejected = false;
     let mut overflow_count = 0;
     let mut removed_from_dirs = Vec::new();
     let mut watch_events = ahash::AHashMap::new();
@@ -580,6 +600,13 @@ fn handle_debounced_events(
 
         files_to_update_git_status.reserve(paths_to_add_or_modify.len());
         for path in &paths_to_add_or_modify {
+            if picker.get_overflow_files().len() >= MAX_OVERFLOW_FILES
+                && picker.get_file_by_path(path).is_none()
+            {
+                index_update_rejected = true;
+                break;
+            }
+
             let existed = need_events_propagation && picker.get_file_by_path(path).is_some();
 
             if picker.handle_create_or_modify(path).is_some() {
@@ -594,7 +621,7 @@ fn handle_debounced_events(
                     watch_events.insert(path.to_path_buf(), kind);
                 }
             } else {
-                need_full_rescan = true;
+                index_update_rejected = true;
             }
         }
 
@@ -606,13 +633,22 @@ fn handle_debounced_events(
         overflow_count, "File index changes applied",
     );
 
-    if need_full_rescan || overflow_count > MAX_OVERFLOW_FILES {
-        info!("Watcher faced limit of index overflow. Triggering rescan");
-        watch_registry.dispatch_rescan(base_path);
-        if let Err(e) = shared_picker.trigger_full_rescan_async(shared_frecency) {
-            error!("Failed to trigger full rescan: {:?}", e);
-        }
-    } else if need_events_propagation {
+    let rescan_started = if index_update_rejected || overflow_count > MAX_OVERFLOW_FILES {
+        let reason = if index_update_rejected {
+            RescanReason::IndexUpdateRejected
+        } else {
+            RescanReason::OverflowCapacity
+        };
+
+        info!(%reason, "Watcher faced limit of index overflow. Triggering rescan");
+        try_trigger_full_rescan(reason)
+    } else {
+        false
+    };
+
+    // When the rescan is throttled the incrementally applied changes are
+    // still the freshest state we have — propagate them to subscribers.
+    if !rescan_started && need_events_propagation {
         watch_registry.dispatch(
             base_path,
             watch_events
@@ -672,7 +708,7 @@ fn handle_debounced_events(
 
     // do not try to update the paths if we anyway going to rescan everything from scratch
     // no repo => no consumer thread, so don't accumulate paths nobody will drain
-    if !need_full_rescan && repo.is_some() {
+    if !index_update_rejected && repo.is_some() {
         if need_full_git_rescan {
             // A full git rescan re-reads every tracked path (including ones that just
             // went clean after a commit), so it already subsumes the per-path update.
@@ -685,35 +721,48 @@ fn handle_debounced_events(
     new_dirs_to_watch
 }
 
-/// After registering a watch on a newly created directory, list its
-/// immediate children and add any files to the picker.
-fn track_files_from_new_directories(
+fn index_new_directory(
     dir: &Path,
     shared_picker: &SharedFilePicker,
     git_workdir: &Option<PathBuf>,
     git_status_worker: &Arc<GitStatusWorker>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
+) -> Vec<PathBuf> {
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's ignore rules; read base_path + rules from the picker.
-    let (base_path, walker_rules, respect_ignore_files, overlay) =
+    let (base_path, walker_rules, follow_symlinks, respect_ignore_files, overlay) =
         match shared_picker.read().ok().and_then(|g| {
             g.as_ref().map(|p| {
                 (
                     p.base_path().to_path_buf(),
                     p.ignore_rules(),
+                    p.follows_symlinks(),
                     p.respects_ignore_files(),
                     p.ignore_overlay(),
                 )
             })
         }) {
-            Some(quad) => quad,
-            None => return,
+            Some(triple) => triple,
+            None => return Vec::new(),
         };
 
+    let walk = match crate::walk::walk_collect_files(
+        dir,
+        repo.is_some(),
+        follow_symlinks,
+        respect_ignore_files,
+        &overlay,
+        1,
+        &Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    ) {
+        Ok(walk) => walk,
+        Err(e) => {
+            warn!(?e, dir = %dir.display(), "Failed to walk new directory");
+            return Vec::new();
+        }
+    };
+
+    // TODO: figure out a better optimized way for zlob to rerun the directory walk using existing
+    // ignore rules, but currently we have to filter out ignored files on our own
     let filter = IgnoreFilter::new(
         &base_path,
         walker_rules,
@@ -721,40 +770,46 @@ fn track_files_from_new_directories(
         respect_ignore_files,
         overlay,
     );
-    let mut files_to_add = Vec::new();
+    let join_unless_ignored = |relative_path: &str| -> Option<PathBuf> {
+        let path = dir.join(relative_path);
+        (!filter.is_ignored(&path)).then_some(path)
+    };
 
-    for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|ft| ft.is_file()) {
-            let path = entry.path();
-            // file_type() already ruled out directories — only ignore rules left
-            if !filter.is_ignored(&path) {
-                files_to_add.push(path);
-            }
-        }
-    }
+    let files_to_add: Vec<PathBuf> = walk
+        .pairs
+        .iter()
+        .filter_map(|(_, path)| join_unless_ignored(path))
+        .collect();
+
+    let subdirs: Vec<PathBuf> = walk
+        .dirs
+        .iter()
+        .filter_map(|path| join_unless_ignored(path.trim_end_matches('/')))
+        .collect();
 
     let mut indexed_files = Vec::with_capacity(files_to_add.len());
     {
         let Ok(mut guard) = shared_picker.write() else {
-            return;
+            return subdirs;
         };
 
         let Some(ref mut picker) = *guard else {
-            return;
+            return subdirs;
         };
 
-        // Directory entries are first-class now: retain empty directories as
-        // soon as their watcher has been installed.
         picker.handle_directory_create(dir);
-        for path in &files_to_add {
-            if picker.handle_create_or_modify(path).is_some() {
-                indexed_files.push(path.clone());
+        for subdir in &subdirs {
+            picker.handle_directory_create(subdir);
+        }
+        for path in files_to_add {
+            if picker.handle_create_or_modify(&path).is_some() {
+                indexed_files.push(path);
             }
         }
     }
 
     if indexed_files.is_empty() {
-        return;
+        return subdirs;
     }
     let added = indexed_files.len();
 
@@ -777,10 +832,35 @@ fn track_files_from_new_directories(
     }
 
     debug!(
-        "Injected {} existing files from new directory {}",
+        "Indexed new {} files from new directory {}",
         added,
         dir.display(),
     );
+
+    subdirs
+}
+
+#[cfg(target_os = "linux")]
+fn watch_dirs_nonrecursive<'a>(
+    debouncer: &Mutex<Option<Debouncer>>,
+    dirs: impl Iterator<Item = &'a Path>,
+) -> bool {
+    let mut guard = debouncer.lock();
+    let Some(debouncer) = guard.as_mut() else {
+        return false;
+    };
+
+    for dir in dirs {
+        if let Err(e) = debouncer.watch(dir, RecursiveMode::NonRecursive) {
+            warn!(
+                ?e,
+                dir = %dir.display(),
+                "Failed to init watcher for new directory"
+            );
+        }
+    }
+
+    true
 }
 
 struct IgnoreFilter<'a> {
@@ -838,13 +918,13 @@ impl<'a> IgnoreFilter<'a> {
             return false;
         }
         if let Some(rules) = self.rules.as_ref() {
-            let Ok(rel) = path.strip_prefix(self.base_path) else {
+            let Ok(relative) = path.strip_prefix(self.base_path) else {
                 return false;
             };
             // `IgnoreRules::is_ignored` enumerates every ancestor .gitignore
             // layer internally, so a leaf under an ignored directory (rule
             // `build/`, path `build/out.rs`) is caught in one call.
-            return rules.is_ignored(rel);
+            return rules.is_ignored(relative);
         }
         match self.repo {
             Some(repo) => repo.is_path_ignored(path) == Ok(true),

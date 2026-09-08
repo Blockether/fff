@@ -1,10 +1,8 @@
-//! Filesystem traversal backed by zlob's native parallel walker.
-//! Active when the `zlob` feature is enabled (requires the Zig toolchain).
-
 use crate::file_picker::is_known_binary_extension_basename;
 use crate::ignore::{CACHE_DIRS, IGNORED_DIRS};
 use crate::types::FileItem;
 use crate::walk::{WalkIgnoreRules, WalkOutput};
+use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -68,24 +66,22 @@ pub(crate) fn walk_collect_files(
         tracing::warn!(?e, "zlob extra_ignore rejected; walking without it");
     }
 
-    let pairs = parking_lot::Mutex::new(Vec::<(FileItem, String)>::new());
-    let dirs = parking_lot::Mutex::new(Vec::<String>::new());
+    // Single lock for both collections: every entry is either a file or a
+    // dir, so this keeps one mutex acquisition per entry.
+    let collected = Mutex::new((Vec::new(), Vec::new()));
 
     let outcome = match builder.run(|entry| {
-        if !entry.is_file() && !entry.is_dir() {
-            return WalkState::Continue;
-        }
-        let rel_bytes = entry.relative_path_bytes();
-        // zlob emits '/'-separated relative paths, which is fff's canonical
-        // internal form on every platform — store them verbatim.
-        let rel_str = String::from_utf8_lossy(rel_bytes).into_owned();
-
-        if entry.is_dir() {
-            // The walk root is implicit and has no searchable relative path.
-            if !rel_str.is_empty() && rel_str != "." {
-                let dir = format!("{}/", rel_str.trim_end_matches('/'));
-                dirs.lock().push(dir);
+        if !entry.is_file() {
+            // unlike ripgrep walker zlob doesnt show .git files
+            if entry.is_dir() {
+                let relative_path = entry.relative_path_lossy();
+                if !relative_path.is_empty() {
+                    let mut relative_path = relative_path.into_owned();
+                    relative_path.push('/');
+                    collected.lock().1.push(relative_path);
+                }
             }
+
             return WalkState::Continue;
         }
 
@@ -100,12 +96,17 @@ pub(crate) fn walk_collect_files(
             .map(|ns| (ns / 1_000_000_000).max(0) as u64)
             .unwrap_or(0);
 
-        let basename_offset = entry.basename_offset_in_relative();
+        // Lossy pair: the offset must index the decoded string, not the raw
+        // bytes, or it lands inside a U+FFFD on invalid-UTF-8 names (#799).
+        let basename_offset = entry.basename_offset_in_relative_lossy() as u16;
+        // zlob emits '/'-separated relative paths, which is fff's canonical
+        // internal form on every platform — store them verbatim.
+        let relative_path = entry.relative_path_lossy().into_owned();
         let item = FileItem::new_raw(basename_offset, size, modified, None, is_binary);
 
-        let mut guard = pairs.lock();
-        guard.push((item, rel_str));
-        let n = guard.len();
+        let mut guard = collected.lock();
+        guard.0.push((item, relative_path));
+        let n = guard.0.len();
         drop(guard);
 
         if n % PROGRESS_STEP == 0 {
@@ -123,10 +124,7 @@ pub(crate) fn walk_collect_files(
         }
     };
 
-    let pairs = pairs.into_inner();
-    let mut dirs = dirs.into_inner();
-    dirs.sort_unstable();
-    dirs.dedup();
+    let (pairs, dirs) = collected.into_inner();
     // Always report the exact final total regardless of the last step.
     synced_files_count.store(pairs.len(), Ordering::Relaxed);
 

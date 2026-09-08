@@ -15,8 +15,8 @@ resolver = "2"
 module_inception = "allow"
 
 [workspace.dependencies]
-fff-grep = { version = "0.10.1", path = "crates/fff-grep" }
-fff-query-parser = { version = "0.10.1", path = "crates/fff-query-parser", default-features = false }
+fff-grep = { version = "0.10.6", path = "crates/fff-grep" }
+fff-query-parser = { version = "0.10.6", path = "crates/fff-query-parser", default-features = false }
 
 # Shared dependencies
 ahash = "0.8"
@@ -26,7 +26,7 @@ ctrlc = "3.4.2"
 dirs = "5.0"
 dunce = "1.0"
 # git2 - base config without TLS (each crate adds platform-specific TLS)
-git2 = { version = "0.20.2", default-features = false, features = [
+git2 = { version = "0.21.0", default-features = false, features = [
   "vendored-libgit2",
 ] }
 glidesort = "0.1"
@@ -36,7 +36,7 @@ ignore = "0.4.22"
 memmap2 = "0.9"
 mimalloc = "0.1.47"
 signal-hook-registry = "1.4"
-zlob = { version = "=1.6.1" }
+zlob = { version = "=1.6.5" }
 
 mlua = { version = "0.11.1", features = ["module", "luajit"] }
 neo_frizbee = { version = "0.11.0", features = ["match_end_col"] }

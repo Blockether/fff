@@ -14,7 +14,7 @@ SHELL := bash
 # string rather than the literal `-o` / `pipefail` tokens.
 .SHELLFLAGS := -o pipefail -euc
 
-.PHONY: build build-c-lib install uninstall test test-rust test-c-smoke test-c-api test-lua test-lua-snap test-version test-bun test-node prepare-bun prepare-bun-packaged prepare-node set-npm-version header test-stress test-stress-seeded test-stress-random test-stress-regressions test-stress-repos test-node-stress sync-js-api sync-js-api-check bump-homebrew-formula bump-install-mcp-sh test-bun-compile
+.PHONY: build build-c-lib install uninstall test test-rust test-rescan test-rescan-known-defects rescan-probe test-c-smoke test-c-api test-lua test-lua-snap test-version test-bun test-node prepare-bun prepare-bun-packaged prepare-node set-npm-version header test-stress test-stress-seeded test-stress-random test-stress-regressions test-stress-repos test-node-stress sync-js-api sync-js-api-check bump-homebrew-formula bump-install-mcp-sh test-bun-compile
 
 all: format test lint
 
@@ -44,6 +44,11 @@ sync-js-api-check:
 
 build:
 	cargo build --release --no-default-features --features zlob
+
+# Only the crates the e2e suites load (nvim lua tests + C/bun/node FFI tests),
+# skipping fff-python (pyo3) and fff-mcp (tokio/rmcp) which e2e never touches.
+build-e2e:
+	cargo build --release -p fff-nvim -p fff-c --no-default-features --features zlob
 
 build-c-lib:
 	cargo build --release -p fff-c --no-default-features --features zlob
@@ -90,7 +95,26 @@ test-setup:
 	fi
 
 test-rust:
-	cargo test --workspace --no-default-features --features zlob --exclude fff-nvim
+	cargo test --workspace --no-default-features --features zlob --exclude fff-nvim --exclude fff-python
+
+# Watcher rescan harness: asserts that editing, build output, git activity and
+# preview reads all stay on the incremental path instead of re-walking the tree.
+test-rescan:
+	cargo test -p fff-search --no-default-features --features zlob \
+		--lib --test rescan_regression -- rescan
+
+# Live probe for watcher rescan requests and their causes.
+# Usage: make rescan-probe DIR=~/some/repo [SECONDS=120]
+rescan-probe:
+	cargo run --release -p fff-nvim --bin rescan_probe \
+		--no-default-features --features zlob,rescan-stats -- \
+		$(or $(DIR),.) $(if $(SECONDS),--seconds $(SECONDS),)
+
+# The same harness, restricted to cases that currently fail on purpose. Each
+# `#[ignore]` reason names the code that causes the unnecessary rescan.
+test-rescan-known-defects:
+	cargo test --no-fail-fast -p fff-search --no-default-features --features zlob \
+		--lib --test rescan_regression -- --ignored --nocapture
 
 CC ?= cc
 CFLAGS ?= -O0 -g -Wall -Wextra -std=c99
@@ -99,7 +123,7 @@ SMOKE_BIN := $(TARGET_DIR)/fff_c_smoke
 SMOKE_SRC := crates/fff-c/tests/smoke.c
 SMOKE_INCLUDE := crates/fff-c/include
 
-test-c-smoke: build
+test-c-smoke: build-e2e
 	$(CC) $(CFLAGS) -I $(SMOKE_INCLUDE) -L $(TARGET_DIR) \
 		-Wl,-rpath,@loader_path/../target/release \
 		-Wl,-rpath,$$(pwd)/$(TARGET_DIR) \
@@ -112,7 +136,7 @@ test-c-api: test-c-smoke
 # neovim instance swallows internal crashes and doesn't rise the the error exiting silently
 # so check the stdout in case the sigsegv coming out of fff was printed (actual regression).
 # Output is streamed live via `tee`; pipefail (set above) propagates nvim's exit.
-test-lua: test-setup build
+test-lua: test-setup build-e2e
 	@logfile=$$(mktemp); \
 	trap 'rm -f "$$logfile"' EXIT; \
 	nvim --headless -u tests/minimal_init.lua \
@@ -124,7 +148,7 @@ test-lua: test-setup build
 		exit 1; \
 	fi
 
-test-lua-snap: test-setup build
+test-lua-snap: test-setup build-e2e
 	@logfile=$$(mktemp); \
 	trap 'rm -f "$$logfile"' EXIT; \
 	nvim --headless -u tests/minimal_init.lua \
@@ -140,13 +164,13 @@ test-version: test-setup
 	nvim --headless -u tests/minimal_init.lua \
 		-c "PlenaryBustedFile tests/version_spec.lua" 2>&1
 
-prepare-bun: build sync-js-api
+prepare-bun: build-e2e sync-js-api
 	mkdir -p packages/fff-bun/bin
 	cp target/release/libfff_c.dylib packages/fff-bun/bin/ 2>/dev/null || true; \
 	cp target/release/libfff_c.so packages/fff-bun/bin/ 2>/dev/null || true; \
 	cp target/release/fff_c.dll packages/fff-bun/bin/ 2>/dev/null || true
 
-prepare-node: build sync-js-api
+prepare-node: build-e2e sync-js-api
 	mkdir -p packages/fff-node/bin
 	cp target/release/libfff_c.dylib packages/fff-node/bin/ 2>/dev/null || true; \
 	cp target/release/libfff_c.so packages/fff-node/bin/ 2>/dev/null || true; \
@@ -250,17 +274,7 @@ test-stress: test-stress-seeded test-stress-random test-stress-regressions test-
 set-npm-version:
 	@test -n "$(PKG)" || (echo "PKG is required" && exit 1)
 	@test -n "$(VERSION)" || (echo "VERSION is required" && exit 1)
-	node -e " \
-		const fs = require('fs'); \
-		const pkg = JSON.parse(fs.readFileSync('$(PKG)/package.json', 'utf8')); \
-		pkg.version = '$(VERSION)'; \
-		if (pkg.optionalDependencies) { \
-			for (const dep of Object.keys(pkg.optionalDependencies)) { \
-				pkg.optionalDependencies[dep] = '$(VERSION)'; \
-			} \
-		} \
-		fs.writeFileSync('$(PKG)/package.json', JSON.stringify(pkg, null, 2) + '\n'); \
-	"
+	node scripts/set-npm-version.mjs "$(PKG)" "$(VERSION)"
 	@echo "Set $(PKG) to $(VERSION)"
 
 format-rust:
@@ -268,7 +282,7 @@ format-rust:
 format-lua:
 	stylua .
 format-ts:
-	bun format
+	cd packages && bun format
 
 format: format-rust format-lua format-ts
 
@@ -277,13 +291,13 @@ lint-rust:
 lint-lua:
 	 ~/.luarocks/bin/luacheck .
 lint-ts:
-	bun lint
+	cd packages && bun lint
 
 lint: lint-rust lint-lua lint-ts
 
 check: format lint
 
-FFF_RELEASE_REPO ?= dmtrKovalenko/fff.nvim
+FFF_RELEASE_REPO ?= dmtrKovalenko/fff
 FFF_FORMULA_PATH ?= Formula/fff-mcp.rb
 FFF_INSTALL_SCRIPT_PATH ?= install-mcp.sh
 

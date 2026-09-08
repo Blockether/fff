@@ -61,7 +61,7 @@ pub(crate) fn walk_collect_files(
         synced_files_count,
         &pairs,
         &dirs,
-        |rel, is_dir| !overlay.is_excluded(Path::new(rel), is_dir),
+        |rel, is_dir| !overlay.is_excluded(&base_path.join(rel), is_dir),
     );
 
     let mut pairs = pairs.into_inner();
@@ -104,16 +104,28 @@ fn collect_unignored(
         return;
     }
 
-    let already: HashSet<String> = pairs.iter().map(|(_, rel)| rel.clone()).collect();
+    let already = parking_lot::Mutex::new(
+        pairs
+            .iter()
+            .map(|(_, rel)| rel.clone())
+            .collect::<HashSet<String>>(),
+    );
     let extra = parking_lot::Mutex::new(Vec::<(FileItem, String)>::new());
     let extra_dirs = parking_lot::Mutex::new(Vec::<String>::new());
     let mut seen_roots: HashSet<&Path> = HashSet::new();
 
     for root in roots {
+        let root = if root.starts_with(base_path) {
+            root.as_path()
+        } else if base_path.starts_with(root) {
+            base_path
+        } else {
+            continue;
+        };
         let is_cache_root = root
             .strip_prefix(base_path)
             .is_ok_and(has_cache_dir_component);
-        if is_cache_root || !seen_roots.insert(root.as_path()) || !root.exists() {
+        if is_cache_root || !seen_roots.insert(root) || !root.exists() {
             continue;
         }
 
@@ -140,10 +152,10 @@ fn collect_unignored(
             &extra,
             &extra_dirs,
             |rel, is_dir| {
-                let rel_path = Path::new(rel);
-                overlay.is_unignored(rel_path, is_dir)
-                    && !overlay.is_excluded(rel_path, is_dir)
-                    && (is_dir || !already.contains(rel))
+                let absolute_path = base_path.join(rel);
+                overlay.is_unignored(&absolute_path, is_dir)
+                    && !overlay.is_excluded(&absolute_path, is_dir)
+                    && (is_dir || already.lock().insert(rel.to_owned()))
             },
         );
     }

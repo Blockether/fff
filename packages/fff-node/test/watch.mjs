@@ -15,7 +15,7 @@ import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { promisify } from "node:util";
-import { FileFinder } from "../dist/src/index.js";
+import { FileFinder } from "../dist/index.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -33,7 +33,7 @@ async function waitFor(cond, timeoutMs = 10_000) {
 /** All events delivered to a batch-callback mock, flattened across calls. */
 const deliveredEvents = (fn) => fn.mock.calls.flatMap((call) => call.arguments[0]);
 
-/** @type {import("../dist/src/finder.js").FileFinder | null} */
+/** @type {import("../dist/finder.js").FileFinder | null} */
 let finder = null;
 /** @type {string} */
 let baseDir = "";
@@ -237,15 +237,21 @@ describe("fff-node watch", { concurrency: 1 }, () => {
       import { mkdtempSync, writeFileSync } from "node:fs";
       import { tmpdir } from "node:os";
       import { join } from "node:path";
-      import { FileFinder } from ${JSON.stringify(new URL("../dist/src/index.js", import.meta.url).href)};
+      import { FileFinder } from ${JSON.stringify(new URL("../dist/index.js", import.meta.url).href)};
 
       const dir = mkdtempSync(join(tmpdir(), "fff-watch-exit-"));
       writeFileSync(join(dir, "seed.txt"), "seed");
       const created = FileFinder.create({ basePath: dir });
       if (!created.ok) throw new Error(created.error);
       const finder = created.value;
-      await finder.waitForScan(10_000);
-      const sub = finder.watch("**/*.txt", () => {});
+      const wait = await finder.waitForScan(10_000);
+      if (!wait.ok || !wait.value) throw new Error("waitForScan failed");
+      const deadline = Date.now() + 2_000;
+      let sub = finder.watch("**/*.txt", () => {});
+      while (!sub.ok && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+        sub = finder.watch("**/*.txt", () => {});
+      }
       if (!sub.ok) throw new Error(sub.error);
       await new Promise((r) => setTimeout(r, 300));
       sub.value();

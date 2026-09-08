@@ -1,6 +1,6 @@
 [package]
 name = "fff-search"
-version = "0.10.1"
+version = "0.10.6"
 edition = "2024"
 license = "MIT"
 authors = ["Dmitriy Kovalenko <dmtr.kovalenko@outlook.com>"]
@@ -11,7 +11,7 @@ workspace = true
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["rlib", "staticlib", "cdylib"]
+crate-type = ["rlib"]
 
 [[bench]]
 name = "parse_bench"
@@ -41,6 +41,9 @@ harness = false
 default = ["ripgrep"]
 # Enable C FFI exports
 ffi = []
+# Count full rescans and their causes. Always on in debug builds; enable this
+# to keep the accounting in a release build (used by the rescan_probe binary).
+rescan-stats = []
 # Enables POC definition classification for grep result matched lines
 definitions = []
 # Pure-Rust filesystem walker + glob matcher (ignore + globset crates).

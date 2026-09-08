@@ -358,4 +358,43 @@ mod tests {
         );
         assert_eq!(counter.load(Ordering::Relaxed), names.len());
     }
+    #[cfg(all(feature = "ripgrep", not(feature = "zlob")))]
+    #[test]
+    fn subtree_walk_preserves_project_overlay_and_stays_in_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        for path in ["new/ignored", "new/empty/deep", "other"] {
+            fs::create_dir_all(root.join(path)).unwrap();
+        }
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        fs::write(root.join(".rgignore"), "custom.txt\n").unwrap();
+        for path in [
+            "new/keep.txt",
+            "new/drop.txt",
+            "new/custom.txt",
+            "new/ignored/keep.txt",
+            "new/ignored/drop.txt",
+            "other/keep.txt",
+        ] {
+            fs::write(root.join(path), "source").unwrap();
+        }
+        let overlay = IgnoreOverlay {
+            custom_ignore_filenames: vec![".rgignore".into()],
+            exclude_globs: vec!["/new/drop.txt".into(), "/new/ignored/drop.txt".into()],
+            unignore_globs: vec![
+                "new/ignored/**".into(),
+                "other/**".into(),
+                "**/keep.txt".into(),
+            ],
+        }
+        .compile(root);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(&root.join("new"), true, false, true, &overlay, 1, &counter)
+            .unwrap();
+        let mut names: Vec<_> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+        names.sort();
+        assert_eq!(names, ["ignored/keep.txt", "keep.txt"]);
+        assert!(out.dirs.iter().any(|dir| dir == "empty/deep/"));
+    }
 }
