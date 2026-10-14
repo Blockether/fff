@@ -107,7 +107,8 @@ pub(crate) fn walk_collect_files(
             ),
         };
 
-        let item = FileItem::new_raw(basename_offset as u16, size, modified, None, is_binary);
+        let mut item = FileItem::new_raw(basename_offset as u16, size, modified, None, is_binary);
+        item.mark_definition_language(basename);
 
         let mut guard = collected.lock();
         guard.0.push((item, relative_path));

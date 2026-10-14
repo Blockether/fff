@@ -101,6 +101,7 @@ function M.close()
   end
   if not M.state.active then return end
 
+  M.close_preview_timer()
   local snapshot = vim.deepcopy(M.state)
   snapshot.base_path = M.state.config and M.state.config.base_path or nil
 
@@ -323,7 +324,7 @@ function M.update_status(progress)
     ---@diagnostic disable-next-line: undefined-field
     local modes = (M.state.grep_config and M.state.grep_config.modes)
       or config.grep.modes
-      or { 'plain', 'regex', 'fuzzy' }
+      or { 'plain', 'regex', 'fuzzy', 'definition_only' }
 
     -- When regex compilation failed and we fell back to literal search, show a warning
     local fallback_label = nil
@@ -345,6 +346,7 @@ function M.update_status(progress)
       plain = 'plain',
       regex = 'regex',
       fuzzy = 'fuzzy',
+      definition_only = 'definitions',
     }
     local mode_label = mode_labels[M.state.grep_mode] or 'plain'
     local hl
@@ -352,6 +354,8 @@ function M.update_status(progress)
       hl = config.hl.grep_plain_active or 'Comment'
     elseif M.state.grep_mode == 'regex' then
       hl = config.hl.grep_regex_active or 'DiagnosticInfo'
+    elseif M.state.grep_mode == 'definition_only' then
+      hl = config.hl.grep_definition_active or 'DiagnosticOk'
     else -- fuzzy
       hl = config.hl.grep_fuzzy_active or 'DiagnosticHint'
     end
@@ -753,7 +757,7 @@ function M.open(opts)
     ---@diagnostic disable-next-line: undefined-field
     local modes = (M.state.grep_config and M.state.grep_config.modes)
       or merged_config.grep.modes
-      or { 'plain', 'regex', 'fuzzy' }
+      or { 'plain', 'regex', 'fuzzy', 'definition_only' }
     M.state.grep_mode = modes[1] or 'plain'
   end
 

@@ -1,6 +1,6 @@
 use super::prefilter::prefilter_with_filepath_retry;
 use super::regex::{RegexMatcher, RegexSink, build_regex};
-use super::sink::{SinkState, debug_assert_newline_terminator};
+use super::sink::{SinkState, debug_assert_newline_terminator, strip_line_terminators};
 use super::types::{GrepMatch, GrepMode, GrepResult, GrepSearchOptions};
 use crate::index::{
     BigramFilter, BigramOverlay, bigram_boundary, fuzzy_candidates, literal_candidates,
@@ -111,7 +111,7 @@ impl Matcher for PlainTextMatcher<'_> {
 }
 
 struct PlainTextSink<'r> {
-    state: SinkState,
+    state: SinkState<'r>,
     finder: &'r NeedleFinder<'r>,
     pattern_len: u32,
     multiline_segment_len: Option<usize>,
@@ -126,15 +126,11 @@ impl Sink for PlainTextSink<'_> {
         sink_match: &SinkMatch<'_>,
     ) -> Result<bool, Self::Error> {
         debug_assert_newline_terminator(searcher);
-        if self.state.max_matches != 0 && self.state.matches.len() >= self.state.max_matches {
-            return Ok(false);
-        }
-
         let line_bytes = sink_match.bytes();
         let (display_bytes, display_len, line_number, byte_offset) =
             SinkState::prepare_line(line_bytes, sink_match);
 
-        let line_content = String::from_utf8_lossy(display_bytes).into_owned();
+        let line_content = String::from_utf8_lossy(display_bytes);
         let mut match_byte_offsets: SmallVec<[(u32, u32); 4]> = SmallVec::new();
         let mut col = 0usize;
         let mut first = true;
@@ -165,17 +161,25 @@ impl Sink for PlainTextSink<'_> {
             });
         }
 
+        let Some(is_definition) = self.state.definition_mode.classify_match(
+            self.state.file,
+            strip_line_terminators(line_bytes),
+            &match_byte_offsets,
+            false,
+        ) else {
+            return Ok(true);
+        };
         let (context_before, context_after) = self.state.extract_context(sink_match);
-        self.state.push_match(
+        Ok(self.state.push_match(
             line_number,
             col,
             byte_offset,
-            line_content,
+            line_content.into_owned(),
             match_byte_offsets,
+            is_definition,
             context_before,
             context_after,
-        );
-        Ok(true)
+        ))
     }
 
     fn finish(&mut self, _: &Searcher, _: &fff_grep::SinkFinish) -> Result<(), Self::Error> {
@@ -222,8 +226,38 @@ pub(crate) fn grep_search<'a>(
     // for later pages: an empty full scan at offset 0 stays empty at any offset,
     // so paging offsets consistently index the literal search's file list.
     let full_scan_empty = result.matches.is_empty() && result.next_file_offset == 0;
-    if !full_scan_empty || query.constraints.is_empty() || abort_signal.load(Ordering::Relaxed) {
+    if !full_scan_empty
+        || query.constraints.is_empty()
+        || options.classify_definitions == super::DefinitionMode::DefinitionOnly
+        || abort_signal.load(Ordering::Relaxed)
+    {
         return result;
+    }
+
+    // An empty section must not trigger a literal retry when the query matched the other section.
+    if options.classify_definitions.is_filtered() {
+        let probe = GrepSearchOptions {
+            file_offset: 0,
+            page_limit: 1,
+            classify_definitions: Default::default(),
+            ..options.clone()
+        };
+        let unfiltered = grep_search_parsed(
+            files,
+            total_files,
+            query,
+            &probe,
+            budget,
+            bigram_index,
+            bigram_overlay,
+            abort_signal,
+            base_path,
+            arena,
+            overflow_arena,
+        );
+        if !unfiltered.matches.is_empty() || unfiltered.next_file_offset != 0 {
+            return result;
+        }
     }
 
     let raw = query.raw_query.trim();
@@ -413,14 +447,15 @@ fn grep_search_parsed<'a>(
         },
         // The single sink-selection point: every mode's matcher/sink pairing
         // is decided here based on the compiled pattern.
-        |file_bytes: &[u8], max_matches: usize| {
+        |file: &FileItem, file_bytes: &[u8], max_matches: usize| {
             let state = SinkState {
+                file,
+                definition_mode: options.classify_definitions,
                 file_index: 0,
                 matches: Vec::with_capacity(4),
                 max_matches,
                 before_context: options.before_context,
                 after_context,
-                classify_definitions: options.classify_definitions,
             };
 
             match regex {
@@ -554,7 +589,7 @@ pub(super) fn perform_grep<'a, F>(
     search_file: F,
 ) -> GrepResult<'a>
 where
-    F: Fn(&[u8], usize) -> Vec<GrepMatch> + Sync,
+    F: Fn(&FileItem, &[u8], usize) -> Vec<GrepMatch> + Sync,
 {
     let time_budget = if options.time_budget_ms > 0 {
         Some(std::time::Duration::from_millis(options.time_budget_ms))
@@ -639,7 +674,7 @@ where
                         return None;
                     }
 
-                    let file_matches = search_file(content, options.max_matches_per_file);
+                    let file_matches = search_file(file, content, options.max_matches_per_file);
 
                     if file_matches.is_empty() {
                         return None;
@@ -716,5 +751,79 @@ where
         next_file_offset,
         regex_fallback_error: None,
         literal_fallback: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grep::DefinitionMode;
+
+    #[test]
+    fn sinks_stop_when_the_retained_match_limit_is_reached() {
+        struct Counted<'a> {
+            inner: PlainTextSink<'a>,
+            candidates: usize,
+        }
+
+        impl Sink for Counted<'_> {
+            type Error = std::io::Error;
+
+            fn matched(
+                &mut self,
+                searcher: &Searcher,
+                mat: &SinkMatch<'_>,
+            ) -> Result<bool, Self::Error> {
+                self.candidates += 1;
+                self.inner.matched(searcher, mat)
+            }
+        }
+
+        let file =
+            FileItem::new_from_walk_parts(Path::new("file.rs"), Path::new("."), None, 100, 0).0;
+        let finder = NeedleFinder::new(b"Needle", false);
+        let matcher = PlainTextMatcher { finder: &finder };
+        for source in [
+            "Needle();\nfn Needle() {}\nNeedle();\n",
+            "fn Needle() {}\nNeedle();\nfn NeedleMore() {}\n",
+        ] {
+            for mode in [
+                DefinitionMode::Off,
+                DefinitionMode::Classify,
+                DefinitionMode::DefinitionOnly,
+                DefinitionMode::UsageOnly,
+            ] {
+                let first_is_definition = source.starts_with("fn ");
+                let expected_candidates = if mode.retains(first_is_definition) {
+                    1
+                } else {
+                    2
+                };
+                let mut sink = Counted {
+                    inner: PlainTextSink {
+                        state: SinkState {
+                            file: &file,
+                            definition_mode: mode,
+                            file_index: 0,
+                            matches: Vec::new(),
+                            max_matches: 1,
+                            before_context: 0,
+                            after_context: 0,
+                        },
+                        finder: &finder,
+                        pattern_len: 6,
+                        multiline_segment_len: None,
+                    },
+                    candidates: 0,
+                };
+                SearcherBuilder::new()
+                    .line_number(true)
+                    .build()
+                    .search_slice(&matcher, source.as_bytes(), &mut sink)
+                    .unwrap();
+                assert_eq!(sink.candidates, expected_candidates, "{mode:?}: {source}");
+                assert_eq!(sink.inner.state.matches.len(), 1);
+            }
+        }
     }
 }

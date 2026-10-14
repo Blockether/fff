@@ -608,7 +608,8 @@ pub unsafe extern "C" fn fff_search_mixed(
 /// 0 = plain text (SIMD), 1 = regex, 2 = fuzzy. Zero picks the default:
 /// `max_file_size` 10 MB, `page_limit` 50, `max_matches_per_file` and
 /// `time_budget_ms` unlimited. `smart_case` is case-insensitive for
-/// all-lowercase queries; `classify_definitions` tags code definitions.
+/// all-lowercase queries. `classify_definitions`: 0 = off, 1 = classify,
+/// 2 = definition_only, 3 = usage_only.
 ///
 /// ## Safety
 /// * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
@@ -626,7 +627,7 @@ pub unsafe extern "C" fn fff_live_grep(
     time_budget_ms: u64,
     before_context: u32,
     after_context: u32,
-    classify_definitions: bool,
+    classify_definitions: u8,
 ) -> *mut FffResult {
     unsafe {
         fff_live_grep_ex(
@@ -666,8 +667,13 @@ pub unsafe extern "C" fn fff_live_grep_ex(
     enforce_time_budget: bool,
     before_context: u32,
     after_context: u32,
-    classify_definitions: bool,
+    classify_definitions: u8,
 ) -> *mut FffResult {
+    let Some(classify_definitions) = fff::DefinitionMode::from_u8(classify_definitions) else {
+        return FffResult::err(
+            "classify_definitions must be 0 (off), 1 (classify), 2 (definition_only), or 3 (usage_only)",
+        );
+    };
     let inst = match unsafe { instance_ref(fff_handle) } {
         Ok(i) => i,
         Err(e) => return e,
@@ -741,7 +747,7 @@ pub unsafe extern "C" fn fff_multi_grep(
     time_budget_ms: u64,
     before_context: u32,
     after_context: u32,
-    classify_definitions: bool,
+    classify_definitions: u8,
 ) -> *mut FffResult {
     unsafe {
         fff_multi_grep_ex(
@@ -780,8 +786,13 @@ pub unsafe extern "C" fn fff_multi_grep_ex(
     enforce_time_budget: bool,
     before_context: u32,
     after_context: u32,
-    classify_definitions: bool,
+    classify_definitions: u8,
 ) -> *mut FffResult {
+    let Some(classify_definitions) = fff::DefinitionMode::from_u8(classify_definitions) else {
+        return FffResult::err(
+            "classify_definitions must be 0 (off), 1 (classify), 2 (definition_only), or 3 (usage_only)",
+        );
+    };
     let inst = match unsafe { instance_ref(fff_handle) } {
         Ok(i) => i,
         Err(e) => return e,

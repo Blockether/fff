@@ -104,7 +104,7 @@ fn grep_options(
         enforce_time_budget,
         before_context: before_context as usize,
         after_context: after_context as usize,
-        classify_definitions,
+        classify_definitions: classify_definitions.into(),
         trim_whitespace: false,
         abort_signal: None,
     }

@@ -57,13 +57,21 @@ pub struct FileItemFlags;
 
 impl FileItemFlags {
     pub const BINARY: u8 = 1 << 0;
-    /// Tombstone — file was deleted but index slot is preserved so
+    /// Tombstone: file was deleted but index slot is preserved so
     /// bigram indices for other files stay valid.
     pub const DELETED: u8 = 1 << 1;
     /// File was added after the last full reindex; its indices point
     /// into the overflow builder arena, not the base arena.
     pub const OVERFLOW: u8 = 1 << 2;
+    // Cached language ID in bits 3..7; zero means unsupported.
+    const DEFINITION_LANGUAGE_MASK: u8 = 0b1111_1000;
 }
+
+const _: () = assert!(
+    FileItemFlags::DEFINITION_LANGUAGE_MASK
+        & (FileItemFlags::BINARY | FileItemFlags::DELETED | FileItemFlags::OVERFLOW)
+        == 0
+);
 
 pub struct DirFlags;
 
@@ -540,6 +548,46 @@ impl FileItem {
             }
         }
         filled
+    }
+
+    pub(crate) fn mark_definition_language(&mut self, filename: &str) {
+        let language = crate::definition::Language::from_filename(filename) as u8;
+        let flags = self.flags.get_mut();
+        *flags = (*flags & !FileItemFlags::DEFINITION_LANGUAGE_MASK) | (language << 3);
+    }
+
+    /// Classify a returned match using the language recorded during indexing.
+    /// Lines longer than 256 bytes are not classified as definitions.
+    pub fn is_definition_match(&self, line: &str, ranges: &[(u32, u32)]) -> bool {
+        let flags = self.flags.load(Ordering::Relaxed);
+        flags & (FileItemFlags::BINARY | FileItemFlags::DELETED) == 0
+            && crate::definition::is_definition_match(
+                (flags & FileItemFlags::DEFINITION_LANGUAGE_MASK) >> 3,
+                line.as_bytes(),
+                ranges,
+                false,
+            )
+    }
+
+    pub(crate) fn classify_definition_match(
+        &self,
+        line: &[u8],
+        ranges: &[(u32, u32)],
+        fuzzy: bool,
+    ) -> bool {
+        let flags = self.flags.load(Ordering::Relaxed);
+        flags & (FileItemFlags::BINARY | FileItemFlags::DELETED) == 0
+            && crate::definition::is_definition_match(
+                (flags & FileItemFlags::DEFINITION_LANGUAGE_MASK) >> 3,
+                line,
+                ranges,
+                fuzzy,
+            )
+    }
+
+    #[inline]
+    pub(crate) fn supports_definitions(&self) -> bool {
+        self.flags.load(Ordering::Relaxed) & FileItemFlags::DEFINITION_LANGUAGE_MASK != 0
     }
 
     #[inline]
@@ -1180,5 +1228,48 @@ mod detect_binary_tests {
         content[0] = b'a';
         content[MAX_FFFILE_SIZE as usize] = 0;
         assert!(!classify(&content));
+    }
+}
+
+#[cfg(test)]
+mod definition_flag_tests {
+    use super::FileItem;
+
+    #[test]
+    fn language_and_existing_flags_preserve_each_other() {
+        for binary in [false, true] {
+            for deleted in [false, true] {
+                for overflow in [false, true] {
+                    let mut file = FileItem::new_raw(0, 0, 0, None, binary);
+                    file.set_deleted(deleted);
+                    file.set_overflow(overflow);
+                    assert!(!file.supports_definitions());
+                    for filename in ["file.rs", "file.py", "file.txt", "file.hs", "file.rs"] {
+                        file.mark_definition_language(filename);
+                        assert_eq!(file.is_binary(), binary);
+                        assert_eq!(file.is_deleted(), deleted);
+                        assert_eq!(file.is_overflow(), overflow);
+                        assert_eq!(file.supports_definitions(), filename != "file.txt");
+                    }
+
+                    let clone = file.clone();
+                    assert_eq!(clone.is_binary(), binary);
+                    assert_eq!(clone.is_deleted(), deleted);
+                    assert_eq!(clone.is_overflow(), overflow);
+                    assert!(clone.supports_definitions());
+                    clone.set_binary(!binary);
+                    clone.set_deleted(!deleted);
+                    clone.set_overflow(!overflow);
+                    assert!(clone.supports_definitions());
+                    clone.set_binary(false);
+                    clone.set_deleted(false);
+                    clone.set_overflow(false);
+                    assert!(clone.is_definition_match("fn needle() {}", &[(3, 9)]));
+                    assert_eq!(file.is_binary(), binary);
+                    assert_eq!(file.is_deleted(), deleted);
+                    assert_eq!(file.is_overflow(), overflow);
+                }
+            }
+        }
     }
 }

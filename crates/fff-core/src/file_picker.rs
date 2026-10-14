@@ -436,7 +436,8 @@ impl FileItem {
             .map(|i| i + 1)
             .unwrap_or(0) as u16;
 
-        let item = Self::new_raw(filename_start, size, modified, git_status, is_binary);
+        let mut item = Self::new_raw(filename_start, size, modified, git_status, is_binary);
+        item.mark_definition_language(&relative_path);
         (item, relative_path)
     }
 
@@ -487,7 +488,8 @@ impl FileItem {
             .map(|i| i + 1)
             .unwrap_or(0) as u16;
 
-        let item = Self::new_raw(fname_offset, size, modified, git_status, is_binary);
+        let mut item = Self::new_raw(fname_offset, size, modified, git_status, is_binary);
+        item.mark_definition_language(&rel_str);
         (item, rel_str)
     }
 
@@ -522,7 +524,8 @@ impl FileItem {
         } else {
             String::from_utf8_lossy(dir_bytes).len() as u16
         };
-        let item = Self::new_raw(basename_offset, size, modified, git_status, is_binary);
+        let mut item = Self::new_raw(basename_offset, size, modified, git_status, is_binary);
+        item.mark_definition_language(&decoded);
         (item, decoded)
     }
 

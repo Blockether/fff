@@ -28,7 +28,9 @@ pub(super) fn prefilter_with_filepath_retry<'a>(
         overflow_arena,
     );
 
-    if !files_to_search.is_empty() {
+    if !files_to_search.is_empty()
+        || options.classify_definitions == super::DefinitionMode::DefinitionOnly
+    {
         return (files_to_search, filtered_file_count);
     }
 
@@ -60,6 +62,7 @@ pub(crate) fn prefilter_files<'a>(
     overflow_arena: crate::simd_path::ArenaPtr,
 ) -> (Vec<&'a FileItem>, usize) {
     let max_file_size = options.max_file_size;
+    let definition_only = options.classify_definitions == super::DefinitionMode::DefinitionOnly;
     let plan = if constraints.is_empty() {
         None
     } else {
@@ -74,8 +77,12 @@ pub(crate) fn prefilter_files<'a>(
     let mut scratch = ConstraintsBuffers::new();
 
     #[inline(always)]
-    fn basic_prefilter(file: &FileItem, max: u64) -> bool {
-        !file.is_deleted() && !file.is_binary() && file.size > 0 && file.size <= max
+    fn basic_prefilter(file: &FileItem, max: u64, definition_only: bool) -> bool {
+        !file.is_deleted()
+            && !file.is_binary()
+            && file.size > 0
+            && file.size <= max
+            && (!definition_only || file.supports_definitions())
     }
 
     // squeeze as much prefilters into a single loop as possible
@@ -101,7 +108,7 @@ pub(crate) fn prefilter_files<'a>(
                         bits &= bits - 1;
 
                         let f = unsafe { indexed.get_unchecked(file_idx) };
-                        if !basic_prefilter(f, max_file_size) {
+                        if !basic_prefilter(f, max_file_size, definition_only) {
                             continue;
                         }
                         if let Some(plan) = plan.as_ref()
@@ -133,7 +140,7 @@ pub(crate) fn prefilter_files<'a>(
 
             // Sequential processing for non-bigrammable files: they are always in the end
             for (offset, f) in tail.iter().enumerate() {
-                if !basic_prefilter(f, max_file_size) {
+                if !basic_prefilter(f, max_file_size, definition_only) {
                     continue;
                 }
                 if let Some(ref p) = plan
@@ -152,7 +159,7 @@ pub(crate) fn prefilter_files<'a>(
         None => {
             let mut out: Vec<&FileItem> = Vec::new();
             for (idx, f) in files.iter().enumerate() {
-                if !basic_prefilter(f, max_file_size) {
+                if !basic_prefilter(f, max_file_size, definition_only) {
                     continue;
                 }
                 if let Some(ref p) = plan
@@ -201,4 +208,71 @@ fn strip_file_path_constraint_if_present<'a>(
         .collect();
 
     Some(filtered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grep::DefinitionMode;
+    use crate::simd_path::ArenaPtr;
+
+    #[test]
+    fn definition_only_prefilters_before_sorting_and_offsets() {
+        let files: Vec<_> = (0..70)
+            .map(|idx| {
+                let size = match idx {
+                    9 => 0,
+                    12 => 101,
+                    _ => 10,
+                };
+                let mut file = FileItem::new_raw(0, size, 1000 - idx, None, idx == 6);
+                file.mark_definition_language(["file.rs", "file.txt", "file.py"][idx as usize % 3]);
+                file.set_deleted(idx == 8);
+                file.set_overflow(idx >= 65);
+                file
+            })
+            .collect();
+        let all = [u64::MAX, 1];
+        let even = [0x5555_5555_5555_5555, 1];
+        for candidates in [None, Some(all.as_slice()), Some(even.as_slice())] {
+            for mode in [
+                DefinitionMode::Off,
+                DefinitionMode::Classify,
+                DefinitionMode::DefinitionOnly,
+                DefinitionMode::UsageOnly,
+            ] {
+                let expected: Vec<_> = (0..70)
+                    .filter(|idx| ![6, 8, 9, 12].contains(idx))
+                    .filter(|idx| mode != DefinitionMode::DefinitionOnly || idx % 3 != 1)
+                    .filter(|idx| {
+                        *idx >= 65
+                            || candidates.is_none_or(|bits| bits[idx / 64] & (1 << (idx % 64)) != 0)
+                    })
+                    .map(|idx| 1000 - idx as u64)
+                    .collect();
+                for offset in [0, 2, expected.len(), expected.len() + 1] {
+                    let options = GrepSearchOptions {
+                        max_file_size: 100,
+                        classify_definitions: mode,
+                        file_offset: offset,
+                        ..Default::default()
+                    };
+                    let (result, count) = prefilter_files(
+                        &files,
+                        &[],
+                        candidates,
+                        65,
+                        &options,
+                        ArenaPtr::null(),
+                        ArenaPtr::null(),
+                    );
+                    assert_eq!(count, expected.len());
+                    assert_eq!(
+                        result.iter().map(|file| file.modified).collect::<Vec<_>>(),
+                        expected[offset.min(expected.len())..],
+                    );
+                }
+            }
+        }
+    }
 }

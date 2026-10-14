@@ -484,73 +484,23 @@ pub fn fuzzy_search_mixed(
     lua_types::MixedSearchResultLua::new(results, picker).into_lua(lua)
 }
 
-#[allow(clippy::type_complexity)]
-pub fn live_grep(
-    lua: &Lua,
-    (
-        query,
-        file_offset,
-        page_size,
-        max_file_size,
-        max_matches_per_file,
-        smart_case,
-        grep_mode,
-        time_budget_ms,
-        trim_whitespace,
-        enforce_time_budget,
-        casing,
-    ): (
-        String,
-        Option<usize>,
-        Option<usize>,
-        Option<u64>,
-        Option<usize>,
-        Option<bool>,
-        Option<String>,
-        Option<u64>,
-        Option<bool>,
-        Option<bool>,
-        Option<String>,
-    ),
-) -> LuaResult<LuaValue> {
-    let file_picker_guard = FILE_PICKER.read().into_lua_result()?;
-    let Some(ref picker) = *file_picker_guard else {
-        return Err(error::to_lua_error(Error::FilePickerMissing));
-    };
+type GrepArgs = (
+    String,
+    Option<usize>,
+    Option<usize>,
+    Option<u64>,
+    Option<usize>,
+    Option<bool>,
+    Option<String>,
+    Option<u64>,
+    Option<bool>,
+    Option<bool>,
+    Option<String>,
+);
 
-    let parsed_query = FFFQuery::parse(&query, NvimGrepConfig);
-    let mode = match grep_mode.as_deref() {
-        Some("regex") => fff::GrepMode::Regex,
-        Some("fuzzy") => fff::GrepMode::Fuzzy,
-        _ => fff::GrepMode::PlainText, // "plain" or nil or unknown
-    };
-    // nil/unknown falls back to the legacy smart_case toggle
-    let casing = match casing.as_deref() {
-        Some("smart") => Some(fff::Casing::Smart),
-        Some("sensitive") => Some(fff::Casing::Sensitive),
-        Some("insensitive") => Some(fff::Casing::Insensitive),
-        _ => None,
-    };
-
-    let options = fff::GrepSearchOptions {
-        max_file_size: max_file_size.unwrap_or(10 * 1024 * 1024),
-        max_matches_per_file: max_matches_per_file.unwrap_or(200),
-        smart_case: smart_case.unwrap_or(true),
-        casing,
-        file_offset: file_offset.unwrap_or(0),
-        page_limit: page_size.unwrap_or(50),
-        mode,
-        time_budget_ms: time_budget_ms.unwrap_or(0),
-        enforce_time_budget: enforce_time_budget.unwrap_or(false),
-        before_context: 0,
-        after_context: 0,
-        classify_definitions: false,
-        trim_whitespace: trim_whitespace.unwrap_or(false),
-        abort_signal: None,
-    };
-
-    let result = picker.grep(&parsed_query, &options);
-    lua_types::GrepResultLua::new(result, picker).into_lua(lua)
+pub fn live_grep(lua: &Lua, args: GrepArgs) -> LuaResult<LuaValue> {
+    let (query, options) = parse_grep_args(args);
+    live_grep_with_options(lua, &query, &options)
 }
 
 /// Build a file-picker result for an absolute path that exists on disk but
@@ -1056,7 +1006,27 @@ fn create_exports(lua: &Lua) -> LuaResult<LuaTable> {
         "fuzzy_search_mixed",
         lua.create_function(fuzzy_search_mixed)?,
     )?;
-    exports.set("live_grep", lua.create_function(live_grep)?)?;
+    exports.set(
+        "live_grep",
+        lua.create_function(|lua, args: LuaMultiValue| {
+            let classify_definitions = match args.get(11) {
+                None | Some(LuaValue::Nil) => fff::DefinitionMode::Off,
+                Some(LuaValue::Boolean(enabled)) => (*enabled).into(),
+                Some(LuaValue::String(mode)) => fff::DefinitionMode::parse(&mode.to_str()?)
+                    .ok_or_else(|| {
+                        LuaError::RuntimeError("Invalid classify_definitions mode".into())
+                    })?,
+                _ => {
+                    return Err(LuaError::RuntimeError(
+                        "classify_definitions must be a mode string or boolean".into(),
+                    ));
+                }
+            };
+            let (query, mut options) = parse_grep_args(GrepArgs::from_lua_multi(args, lua)?);
+            options.classify_definitions = classify_definitions;
+            live_grep_with_options(lua, &query, &options)
+        })?,
+    )?;
     exports.set("track_access", lua.create_function(track_access)?)?;
     exports.set(
         "get_file_access_count",
@@ -1113,4 +1083,66 @@ fn fff_nvim(lua: &Lua) -> LuaResult<LuaTable> {
     crate::log::install_panic_hook();
 
     create_exports(lua)
+}
+
+fn parse_grep_args(
+    (
+        query,
+        file_offset,
+        page_size,
+        max_file_size,
+        max_matches_per_file,
+        smart_case,
+        grep_mode,
+        time_budget_ms,
+        trim_whitespace,
+        enforce_time_budget,
+        casing,
+    ): GrepArgs,
+) -> (String, fff::GrepSearchOptions) {
+    let mode = match grep_mode.as_deref() {
+        Some("regex") => fff::GrepMode::Regex,
+        Some("fuzzy") => fff::GrepMode::Fuzzy,
+        _ => fff::GrepMode::PlainText, // "plain" or nil or unknown
+    };
+    // nil/unknown falls back to the legacy smart_case toggle
+    let casing = match casing.as_deref() {
+        Some("smart") => Some(fff::Casing::Smart),
+        Some("sensitive") => Some(fff::Casing::Sensitive),
+        Some("insensitive") => Some(fff::Casing::Insensitive),
+        _ => None,
+    };
+
+    let options = fff::GrepSearchOptions {
+        max_file_size: max_file_size.unwrap_or(10 * 1024 * 1024),
+        max_matches_per_file: max_matches_per_file.unwrap_or(200),
+        smart_case: smart_case.unwrap_or(true),
+        casing,
+        file_offset: file_offset.unwrap_or(0),
+        page_limit: page_size.unwrap_or(50),
+        mode,
+        time_budget_ms: time_budget_ms.unwrap_or(0),
+        enforce_time_budget: enforce_time_budget.unwrap_or(false),
+        before_context: 0,
+        after_context: 0,
+        classify_definitions: Default::default(),
+        trim_whitespace: trim_whitespace.unwrap_or(false),
+        abort_signal: None,
+    };
+
+    (query, options)
+}
+
+fn live_grep_with_options(
+    lua: &Lua,
+    query: &str,
+    options: &fff::GrepSearchOptions,
+) -> LuaResult<LuaValue> {
+    let file_picker_guard = FILE_PICKER.read().into_lua_result()?;
+    let Some(ref picker) = *file_picker_guard else {
+        return Err(error::to_lua_error(Error::FilePickerMissing));
+    };
+    let parsed_query = FFFQuery::parse(query, NvimGrepConfig);
+    let result = picker.grep(&parsed_query, options);
+    lua_types::GrepResultLua::new(result, picker).into_lua(lua)
 }

@@ -6,7 +6,7 @@ use fff::git::format_git_status_opt;
 use fff::grep::is_import_line;
 use fff::types::FileItem;
 
-use crate::cursor::CursorStore;
+use crate::cursor::{CursorStore, GrepCursor};
 
 fn frecency_word(score: i32) -> Option<&'static str> {
     if score >= 100 {
@@ -155,7 +155,7 @@ pub struct GrepFormatter<'a> {
     pub matches: &'a [GrepMatch],
     pub files: &'a [&'a FileItem],
     pub total_matched: usize,
-    pub next_file_offset: usize,
+    pub cursor: GrepCursor,
     pub output_mode: OutputMode,
     pub max_results: usize,
     pub show_context: bool,
@@ -169,7 +169,7 @@ impl GrepFormatter<'_> {
             matches,
             files,
             total_matched,
-            next_file_offset,
+            cursor,
             output_mode,
             max_results,
             show_context,
@@ -187,7 +187,7 @@ impl GrepFormatter<'_> {
             return format_files_with_matches(
                 items,
                 files,
-                next_file_offset,
+                cursor,
                 auto_expand_defs,
                 cursor_store,
                 picker,
@@ -195,7 +195,7 @@ impl GrepFormatter<'_> {
         }
 
         if output_mode == OutputMode::Count {
-            return format_count(items, files, next_file_offset, cursor_store, picker);
+            return format_count(items, files, cursor, cursor_store, picker);
         }
 
         // output_mode == usage
@@ -365,8 +365,8 @@ impl GrepFormatter<'_> {
             shown_count += 1;
         }
 
-        if next_file_offset > 0 {
-            let cursor_id = cursor_store.store(next_file_offset);
+        if cursor.file_offset > 0 {
+            let cursor_id = cursor_store.store_grep(cursor);
             lines.push(format!("\ncursor: {}", cursor_id));
         }
 
@@ -377,7 +377,7 @@ impl GrepFormatter<'_> {
 fn format_files_with_matches(
     items: &[GrepMatch],
     files: &[&FileItem],
-    next_file_offset: usize,
+    cursor: GrepCursor,
     auto_expand_defs: bool,
     cursor_store: &mut CursorStore,
     picker: &FilePicker,
@@ -482,8 +482,8 @@ fn format_files_with_matches(
         }
     }
 
-    if next_file_offset > 0 {
-        let cursor_id = cursor_store.store(next_file_offset);
+    if cursor.file_offset > 0 {
+        let cursor_id = cursor_store.store_grep(cursor);
         lines.push(format!("\ncursor: {}", cursor_id));
     }
 
@@ -493,7 +493,7 @@ fn format_files_with_matches(
 fn format_count(
     items: &[GrepMatch],
     files: &[&FileItem],
-    next_file_offset: usize,
+    cursor: GrepCursor,
     cursor_store: &mut CursorStore,
     picker: &FilePicker,
 ) -> String {
@@ -513,8 +513,8 @@ fn format_count(
     for path in &order {
         lines.push(format!("{}: {}", path, counts[path.as_str()]));
     }
-    if next_file_offset > 0 {
-        let cursor_id = cursor_store.store(next_file_offset);
+    if cursor.file_offset > 0 {
+        let cursor_id = cursor_store.store_grep(cursor);
         lines.push(format!("\ncursor: {}", cursor_id));
     }
     lines.join("\n")
