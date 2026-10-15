@@ -20,6 +20,7 @@ import {
 import { findBinary } from "./download";
 import { embeddedLibPath } from "./embedded";
 import type {
+  DefinitionMode,
   DirItem,
   DirSearchResult,
   FileItem,
@@ -35,7 +36,7 @@ import type {
   WatchEvent,
   WatchEventKind,
 } from "./fff-api";
-import { createGrepCursor, err } from "./fff-api";
+import { createGrepCursor, definitionModeToInt, err } from "./fff-api";
 
 /** Grep mode constants matching the C API (u8). */
 const GREP_MODE_PLAIN = 0;
@@ -153,7 +154,7 @@ const ffiDefinition = {
       FFIType.bool, // enforce_time_budget
       FFIType.u32, // before_context
       FFIType.u32, // after_context
-      FFIType.bool, // classify_definitions
+      FFIType.u8, // classify_definitions
     ],
     returns: FFIType.ptr,
   },
@@ -173,7 +174,7 @@ const ffiDefinition = {
       FFIType.bool, // enforce_time_budget
       FFIType.u32, // before_context
       FFIType.u32, // after_context
-      FFIType.bool, // classify_definitions
+      FFIType.u8, // classify_definitions
     ],
     returns: FFIType.ptr,
   },
@@ -661,7 +662,8 @@ const SC_FREC = 16; // i32         (4)
 const SC_DIST = 20; // i32         (4)
 const SC_CURFILE = 24; // i32         (4)
 const SC_COMBO = 28; // i32         (4)
-const SC_EXACT = 32; // bool        (1 + 7 pad)
+const SC_PATH_ALIGN = 32; // i32         (4)
+const SC_EXACT = 36; // bool        (1 + 3 pad)
 const SC_MTYPE = 40; // *mut c_char (8)
 const SC_SIZE_OF = 48;
 
@@ -701,6 +703,7 @@ function readScoreStruct(p: number): Score {
     distancePenalty: read.i32(pp, SC_DIST),
     currentFilePenalty: read.i32(pp, SC_CURFILE),
     comboMatchBoost: read.i32(pp, SC_COMBO),
+    pathAlignmentBonus: read.i32(pp, SC_PATH_ALIGN),
     exactMatch: read.u8(pp, SC_EXACT) !== 0,
     matchType: readCString(read.ptr(pp, SC_MTYPE)) ?? "",
   };
@@ -1253,8 +1256,11 @@ export function ffiLiveGrep(
   enforceTimeBudget: boolean,
   beforeContext: number,
   afterContext: number,
-  classifyDefinitions: boolean,
+  classifyDefinitions: DefinitionMode | boolean,
 ): Result<GrepResult> {
+  const definitionMode = definitionModeToInt(classifyDefinitions);
+  if (definitionMode === undefined) return err("Invalid classifyDefinitions mode");
+
   const library = loadLibrary();
   const resultPtr = library.symbols.fff_live_grep_ex(
     handle,
@@ -1269,7 +1275,7 @@ export function ffiLiveGrep(
     enforceTimeBudget,
     beforeContext,
     afterContext,
-    classifyDefinitions,
+    definitionMode,
   );
   return parseGrepResult(resultPtr);
 }
@@ -1290,8 +1296,11 @@ export function ffiMultiGrep(
   enforceTimeBudget: boolean,
   beforeContext: number,
   afterContext: number,
-  classifyDefinitions: boolean,
+  classifyDefinitions: DefinitionMode | boolean,
 ): Result<GrepResult> {
+  const definitionMode = definitionModeToInt(classifyDefinitions);
+  if (definitionMode === undefined) return err("Invalid classifyDefinitions mode");
+
   const library = loadLibrary();
   const resultPtr = library.symbols.fff_multi_grep_ex(
     handle,
@@ -1306,7 +1315,7 @@ export function ffiMultiGrep(
     enforceTimeBudget,
     beforeContext,
     afterContext,
-    classifyDefinitions,
+    definitionMode,
   );
   return parseGrepResult(resultPtr);
 }

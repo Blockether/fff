@@ -106,6 +106,64 @@ impl ChunkedString {
     }
 
     #[inline]
+    pub(crate) fn equals(&self, arena: ArenaPtr, other: &str) -> bool {
+        if other.len() != self.byte_len as usize {
+            return false;
+        }
+        self.indices(arena)
+            .iter()
+            .zip(other.as_bytes().chunks(SIMD_CHUNK_BYTES))
+            .all(|(&index, expected)| {
+                let actual =
+                    unsafe { core::slice::from_raw_parts(arena.chunk_ptr(index), expected.len()) };
+                actual == expected
+            })
+    }
+
+    #[inline]
+    pub(crate) fn common_suffix_len_ignore_ascii_case(
+        &self,
+        arena: ArenaPtr,
+        other: &[u8],
+    ) -> usize {
+        let indices = self.indices(arena);
+        let mut end = self.byte_len as usize;
+        let mut matched = 0;
+        while end > 0 && matched < other.len() {
+            let chunk = (end - 1) / SIMD_CHUNK_BYTES;
+            let len = end - chunk * SIMD_CHUNK_BYTES;
+            let bytes =
+                unsafe { core::slice::from_raw_parts(arena.chunk_ptr(indices[chunk]), len) };
+            for (&a, &b) in bytes
+                .iter()
+                .rev()
+                .zip(other[..other.len() - matched].iter().rev())
+            {
+                if !a.eq_ignore_ascii_case(&b) {
+                    return matched;
+                }
+                matched += 1;
+            }
+            end -= len;
+        }
+        matched
+    }
+
+    #[inline]
+    pub(crate) fn has_extension(&self, arena: ArenaPtr, extension: &str) -> bool {
+        let filename_len = (self.byte_len - self.filename_offset) as usize;
+        if filename_len <= extension.len() + 1 {
+            return false;
+        }
+        let dot = self.byte_len as usize - extension.len() - 1;
+        let chunk = self.indices(arena)[dot / SIMD_CHUNK_BYTES];
+        let byte = unsafe { *arena.chunk_ptr(chunk).add(dot % SIMD_CHUNK_BYTES) };
+        byte == b'.'
+            && self.common_suffix_len_ignore_ascii_case(arena, extension.as_bytes())
+                == extension.len()
+    }
+
+    #[inline]
     fn indices<'a>(&self, arena: ArenaPtr) -> &'a [u32] {
         let count = self.chunk_count();
         if count == 0 {
@@ -143,11 +201,7 @@ impl ChunkedString {
         }
     }
 
-    /// Return the filename portion as a `Cow<str>`.
-    ///
-    /// When the filename starts at a chunk boundary and fits in one chunk we
-    /// borrow directly from the arena (zero-copy). Otherwise we allocate.
-    /// Filenames are almost always <=16 bytes so the fast path dominates.
+    /// Borrow filenames contained in one chunk; copy filenames spanning chunks.
     #[inline]
     pub fn filename_cow<'a>(&self, arena: ArenaPtr) -> Cow<'a, str> {
         let fname_offset = self.filename_offset as usize;
@@ -160,9 +214,9 @@ impl ChunkedString {
         let start_chunk = fname_offset / SIMD_CHUNK_BYTES;
         let offset_in_chunk = fname_offset % SIMD_CHUNK_BYTES;
 
-        if offset_in_chunk == 0 && fname_len <= SIMD_CHUNK_BYTES {
+        if offset_in_chunk + fname_len <= SIMD_CHUNK_BYTES {
             let ptr = arena.chunk_ptr(indices[start_chunk]);
-            let slice = unsafe { core::slice::from_raw_parts(ptr, fname_len) };
+            let slice = unsafe { core::slice::from_raw_parts(ptr.add(offset_in_chunk), fname_len) };
             return Cow::Borrowed(unsafe { core::str::from_utf8_unchecked(slice) });
         }
 
@@ -241,7 +295,10 @@ impl ChunkedString {
     #[inline]
     pub fn write_to_string(&self, arena: ArenaPtr, out: &mut String) {
         out.clear();
+        self.append_to_string(arena, out);
+    }
 
+    pub(crate) fn append_to_string(&self, arena: ArenaPtr, out: &mut String) {
         let total = self.byte_len as usize;
         if total == 0 {
             return;
@@ -388,6 +445,36 @@ pub(crate) fn build_chunked_path_store_from_strings(
 mod tests {
     use super::*;
 
+    #[test]
+    fn chunked_suffix_matches_contiguous_bytes() {
+        let paths = [
+            "",
+            "src/main.rs",
+            "src/components/Controller.tsx",
+            "src/日本語/éController.tsx",
+            "abcdefghijklmnopABCDEFGHIJKLMNOP.rs",
+        ];
+        let (store, strings, _) = build_test_store(&paths);
+        for (path, chunked) in paths.iter().zip(&strings) {
+            for candidate in paths {
+                for start in 0..=candidate.len() {
+                    let suffix = &candidate.as_bytes()[start..];
+                    let expected = path
+                        .as_bytes()
+                        .iter()
+                        .rev()
+                        .zip(suffix.iter().rev())
+                        .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+                        .count();
+                    assert_eq!(
+                        chunked.common_suffix_len_ignore_ascii_case(store.as_arena_ptr(), suffix),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
     fn make_file_item(path: &str) -> crate::types::FileItem {
         let filename_start = path
             .rfind(std::path::is_separator)
@@ -418,6 +505,42 @@ mod tests {
         let (store, strings, _files) = build_test_store(&[]);
         assert_eq!(strings.len(), 0);
         assert_eq!(store.unique_chunks(), 0);
+    }
+
+    #[test]
+    fn chunked_extensions_match_contiguous_filenames() {
+        let paths = [
+            "",
+            ".rs",
+            "a.",
+            "src/long_directory/main.RS",
+            "src/é.日本語",
+            "dir.rs/file",
+            "abcdefghijklmn.rs",
+            "abcdefghijklmno.rs",
+            "abcdefghijklmnop.rs",
+            "a.tar.gz",
+        ];
+        let (store, strings, _) = build_test_store(&paths);
+        for (path, chunked) in paths.iter().zip(&strings) {
+            let filename = path.rsplit('/').next().unwrap();
+            for extension in [
+                "",
+                "rs",
+                "RS",
+                "gz",
+                "tar.gz",
+                "日本語",
+                "語",
+                "a/more.than.a.chunk",
+            ] {
+                assert_eq!(
+                    chunked.has_extension(store.as_arena_ptr(), extension),
+                    crate::index::constraints::file_has_extension(filename, extension),
+                    "{path}, {extension}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -610,6 +733,67 @@ mod tests {
         assert_eq!(cs.filename_offset, 0);
         let fname = cs.filename_cow(arena);
         assert_eq!(&*fname, "Cargo.toml");
+    }
+
+    #[test]
+    fn chunked_equals_matches_string_equality() {
+        for len in 0..=100 {
+            let path = format!("{}é🦀", "x".repeat(len));
+            let (store, strings, _) = build_test_store(&[&path, "src/lib.rs"]);
+            let arena = store.as_arena_ptr();
+            for other in [&path, "", "src/lib.rs", &format!("y{}é🦀", "x".repeat(len))] {
+                assert_eq!(strings[0].equals(arena, other), path == other);
+            }
+            for index in 0..len {
+                let mut other = path.clone().into_bytes();
+                other[index] = b'y';
+                assert!(!strings[0].equals(arena, &String::from_utf8(other).unwrap()));
+            }
+        }
+        assert!(ChunkedString::empty().equals(ArenaPtr::null(), ""));
+        assert!(!ChunkedString::empty().equals(ArenaPtr::null(), "x"));
+    }
+
+    #[test]
+    fn append_paths_preserves_existing_text() {
+        let paths = [
+            "",
+            "src/lib.rs",
+            "目录/é🦀.rs",
+            "long/path/with/many/components/file.rs",
+        ];
+        let (store, strings, _) = build_test_store(&paths);
+        let mut output = String::from("prefix:");
+        for string in &strings {
+            string.append_to_string(store.as_arena_ptr(), &mut output);
+        }
+        assert_eq!(output, format!("prefix:{}", paths.concat()));
+    }
+
+    #[test]
+    fn filename_cow_borrows_at_every_offset_within_a_chunk() {
+        for offset in 0..SIMD_CHUNK_BYTES {
+            for name in [
+                "x",
+                "é",
+                "file.rs",
+                "sixteenbytes.txt",
+                "filename_over_sixteen.rs",
+            ] {
+                let prefix = "d".repeat(offset);
+                let path = format!("{prefix}{name}");
+                let mut builder = ChunkedPathStoreBuilder::new(1);
+                let string = builder.add_file_immediate(&path, offset as u16);
+                let store = builder.finish();
+                let filename = string.filename_cow(store.as_arena_ptr());
+
+                assert_eq!(filename, name);
+                assert_eq!(
+                    matches!(filename, Cow::Borrowed(_)),
+                    offset + name.len() <= SIMD_CHUNK_BYTES,
+                );
+            }
+        }
     }
 
     #[test]

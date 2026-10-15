@@ -40,7 +40,7 @@ fn plain_opts() -> GrepSearchOptions {
         enforce_time_budget: false,
         before_context: 0,
         after_context: 0,
-        classify_definitions: false,
+        classify_definitions: Default::default(),
         trim_whitespace: false,
         abort_signal: None,
     }
@@ -60,7 +60,7 @@ fn regex_opts() -> GrepSearchOptions {
         enforce_time_budget: false,
         before_context: 0,
         after_context: 0,
-        classify_definitions: false,
+        classify_definitions: Default::default(),
         trim_whitespace: false,
         abort_signal: None,
     }
@@ -80,7 +80,7 @@ fn fuzzy_opts() -> GrepSearchOptions {
         enforce_time_budget: false,
         before_context: 0,
         after_context: 0,
-        classify_definitions: false,
+        classify_definitions: Default::default(),
         trim_whitespace: false,
         abort_signal: None,
     }

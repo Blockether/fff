@@ -437,7 +437,8 @@ impl FileItem {
             .map(|i| i + 1)
             .unwrap_or(0) as u16;
 
-        let item = Self::new_raw(filename_start, size, modified, git_status, is_binary);
+        let mut item = Self::new_raw(filename_start, size, modified, git_status, is_binary);
+        item.mark_definition_language(&relative_path);
         (item, relative_path)
     }
 
@@ -488,7 +489,8 @@ impl FileItem {
             .map(|i| i + 1)
             .unwrap_or(0) as u16;
 
-        let item = Self::new_raw(fname_offset, size, modified, git_status, is_binary);
+        let mut item = Self::new_raw(fname_offset, size, modified, git_status, is_binary);
+        item.mark_definition_language(&rel_str);
         (item, rel_str)
     }
 
@@ -523,7 +525,8 @@ impl FileItem {
         } else {
             String::from_utf8_lossy(dir_bytes).len() as u16
         };
-        let item = Self::new_raw(basename_offset, size, modified, git_status, is_binary);
+        let mut item = Self::new_raw(basename_offset, size, modified, git_status, is_binary);
+        item.mark_definition_language(&decoded);
         (item, decoded)
     }
 
@@ -915,9 +918,8 @@ impl FilePicker {
             error!("Refusing to index filesystem root: {}", path.display());
             return Err(Error::FilesystemRoot(path));
         }
-        if !options.enable_home_dir_scanning
-            && Some(path.as_os_str()) == dirs::home_dir().as_ref().map(|p| p.as_os_str())
-        {
+        // Path equality compares components, so "~/" (as git root discovery returns it) matches too.
+        if !options.enable_home_dir_scanning && dirs::home_dir().is_some_and(|home| path == home) {
             error!("Refusing to index home directory: {}", path.display());
             return Err(Error::FilesystemRoot(path));
         }
@@ -1432,6 +1434,7 @@ impl FilePicker {
         SEARCH_THREAD_POOL.install(|| {
             grep_search(
                 self.get_files(),
+                self.live_file_count(),
                 query,
                 options,
                 self.cache_budget(),
@@ -1759,6 +1762,10 @@ impl FilePicker {
     /// which indicates that it's time to trigger a new sync
     #[tracing::instrument(skip(self))]
     pub fn add_new_file(&mut self, path: &Path) -> Option<&FileItem> {
+        if self.get_overflow_files().len() >= MAX_OVERFLOW_FILES {
+            return None;
+        }
+
         // On Windows `pathdiff::diff_paths` is byte-wise, so a short-name
         // input never shares a prefix with the canonicalized base_path and
         // the resulting relative path becomes absolute. Canonicalize first.
@@ -2521,6 +2528,23 @@ pub(crate) fn hint_allocator_collect() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuses_home_dir_with_trailing_separator() {
+        let Some(home) = dirs::home_dir() else { return };
+        for base in [home.clone(), home.join("")] {
+            let result = FilePicker::new(FilePickerOptions {
+                base_path: base.to_string_lossy().into_owned(),
+                watch: false,
+                ..Default::default()
+            });
+            assert!(
+                matches!(result, Err(Error::FilesystemRoot(_))),
+                "home dir accepted as {}",
+                base.display()
+            );
+        }
+    }
 
     /// The watcher must watch every ancestor directory up to `base_path`,
     /// not just the immediate parents of indexed files. The dir table is

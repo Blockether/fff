@@ -101,6 +101,7 @@ function M.close()
   end
   if not M.state.active then return end
 
+  M.close_preview_timer()
   local snapshot = vim.deepcopy(M.state)
   snapshot.base_path = M.state.config and M.state.config.base_path or nil
 
@@ -323,7 +324,7 @@ function M.update_status(progress)
     ---@diagnostic disable-next-line: undefined-field
     local modes = (M.state.grep_config and M.state.grep_config.modes)
       or config.grep.modes
-      or { 'plain', 'regex', 'fuzzy' }
+      or { 'plain', 'regex', 'fuzzy', 'definition_only' }
 
     -- When regex compilation failed and we fell back to literal search, show a warning
     local fallback_label = nil
@@ -345,6 +346,7 @@ function M.update_status(progress)
       plain = 'plain',
       regex = 'regex',
       fuzzy = 'fuzzy',
+      definition_only = 'definitions',
     }
     local mode_label = mode_labels[M.state.grep_mode] or 'plain'
     local hl
@@ -352,6 +354,8 @@ function M.update_status(progress)
       hl = config.hl.grep_plain_active or 'Comment'
     elseif M.state.grep_mode == 'regex' then
       hl = config.hl.grep_regex_active or 'DiagnosticInfo'
+    elseif M.state.grep_mode == 'definition_only' then
+      hl = config.hl.grep_definition_active or 'DiagnosticOk'
     else -- fuzzy
       hl = config.hl.grep_fuzzy_active or 'DiagnosticHint'
     end
@@ -390,6 +394,8 @@ function M.update_status(progress)
   local status_info
   if progress and progress.is_scanning then
     status_info = string.format('Indexing files %d', progress.scanned_files_count)
+  elseif config.layout.show_file_count == false then
+    status_info = ''
   else
     local search_metadata = file_picker.get_search_metadata()
     if #M.state.query < 2 then
@@ -403,6 +409,7 @@ function M.update_status(progress)
   M.state.last_status_info = status_info
 
   vim.api.nvim_buf_clear_namespace(M.state.input_buf, M.state.ns_id, 0, -1)
+  if status_info == '' then return end
 
   local win_width = vim.api.nvim_win_get_width(M.state.input_win)
   local available_width = win_width - 2
@@ -544,7 +551,11 @@ function M.select(action)
           opened_via_split = true
         end
 
-        if not opened_via_split then vim.cmd('edit ' .. vim.fn.fnameescape(edit_path)) end
+        -- `:edit` of the current file reloads it and fails with E37 if modified.
+        -- bufadd() matches names like :edit does (relative paths, symlinks).
+        if not opened_via_split and vim.fn.bufadd(edit_path) ~= vim.api.nvim_get_current_buf() then
+          vim.cmd('edit ' .. vim.fn.fnameescape(edit_path))
+        end
       elseif action == 'split' then
         vim.cmd('split ' .. vim.fn.fnameescape(relative_path))
       elseif action == 'vsplit' then
@@ -746,7 +757,7 @@ function M.open(opts)
     ---@diagnostic disable-next-line: undefined-field
     local modes = (M.state.grep_config and M.state.grep_config.modes)
       or merged_config.grep.modes
-      or { 'plain', 'regex', 'fuzzy' }
+      or { 'plain', 'regex', 'fuzzy', 'definition_only' }
     M.state.grep_mode = modes[1] or 'plain'
   end
 

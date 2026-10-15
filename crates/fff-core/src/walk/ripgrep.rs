@@ -277,11 +277,13 @@ fn file_item(path: &Path, rel_path: &str, metadata: Option<&std::fs::Metadata>) 
     let filename_start = rel_path
         .rfind(std::path::is_separator)
         .map_or(0, |index| index + 1) as u16;
-    FileItem::new_raw(
+    let mut item = FileItem::new_raw(
         filename_start,
         size,
         modified,
         None,
         crate::file_picker::is_known_binary_extension(path),
-    )
+    );
+    item.mark_definition_language(rel_path);
+    item
 }

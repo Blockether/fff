@@ -122,6 +122,8 @@ pub mod git;
 pub mod git_recency;
 pub use git_recency::GitRecencyConfig;
 
+mod definition;
+
 /// Live grep search with regex, plain-text, and fuzzy matching modes.
 pub mod grep;
 pub use grep::*;
@@ -140,6 +142,8 @@ pub use list::{ListEntry, ListOptions, list_directory};
 /// Core data types shared across the crate.
 pub mod types;
 pub use types::*;
+
+mod match_offsets;
 
 pub mod constants;
 

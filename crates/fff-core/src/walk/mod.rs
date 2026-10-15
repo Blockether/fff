@@ -151,6 +151,62 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("node_modules")));
     }
 
+    // Stow-style file symlinks pointing outside the root must be indexed with
+    // follow_symlinks on, with the target's metadata (#912).
+    #[cfg(unix)]
+    #[test]
+    fn follows_file_symlinks_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("dotfiles");
+        let root = dir.path().join("config");
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(outside.join("sesh.toml"), "0123456789").unwrap();
+        fs::write(outside.join("nested/inner.toml"), "x").unwrap();
+        fs::write(root.join("projects.toml"), "x").unwrap();
+        std::os::unix::fs::symlink("../dotfiles/sesh.toml", root.join("sesh.toml")).unwrap();
+        std::os::unix::fs::symlink("../dotfiles/nested", root.join("linked")).unwrap();
+        std::os::unix::fs::symlink("../dotfiles/missing", root.join("broken")).unwrap();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let overlay = IgnoreOverlay::default().compile(&root);
+        let out = walk_collect_files(&root, false, true, true, &overlay, 1, &counter).unwrap();
+        let mut names: Vec<String> = out.pairs.iter().map(|(_, rel)| rel.clone()).collect();
+        names.sort();
+
+        assert_eq!(names, ["linked/inner.toml", "projects.toml", "sesh.toml"]);
+        assert_eq!(counter.load(Ordering::Relaxed), names.len());
+
+        let (item, rel) = out.pairs.iter().find(|(_, r)| r == "sesh.toml").unwrap();
+        assert_eq!(item.size, 10);
+        assert_eq!(&rel[item.filename_offset_in_relative_path()..], "sesh.toml");
+
+        let out = walk_collect_files(&root, false, false, true, &overlay, 1, &counter).unwrap();
+        let names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+        assert_eq!(names, ["projects.toml"]);
+    }
+
+    // Every backend records the definition language while it walks. The ripgrep
+    // walker once skipped it, so grep never classified its files as definitions.
+    #[test]
+    fn marks_definition_language_of_walked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("notes.txt"), "main").unwrap();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let overlay = IgnoreOverlay::default().compile(root);
+        let out = walk_collect_files(root, false, false, true, &overlay, 1, &counter).unwrap();
+        let supports = |name: &str| {
+            let (item, _) = out.pairs.iter().find(|(_, rel)| rel == name).unwrap();
+            item.supports_definitions()
+        };
+
+        assert!(supports("main.rs"));
+        assert!(!supports("notes.txt"));
+    }
+
     // Only the zlob backend surfaces reusable ignore rules; they must match
     // the same tree the walk respected.
     #[cfg(feature = "zlob")]
