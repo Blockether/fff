@@ -1202,14 +1202,17 @@ pub(crate) fn sniff_binary_for_non_indexable(
 }
 
 /// Drop the per-thread read/normalize buffers (up to 2 x 2 MiB per pool thread)
-/// so idle workers don't pin them in RSS. Call after the index is installed:
-/// the broadcast waits for every worker and must not delay searchability.
+/// so idle workers don't pin them in RSS. Call after the index is installed.
+///
+/// Each worker drops its buffers when it is next free. A blocking `broadcast`
+/// here made a finished scan wait for every other scan on the pool, so a small
+/// rescan stayed "indexing" until the largest concurrent scan completed.
 pub(crate) fn release_thread_buffers() {
     fn release() {
         READ_BUF.with_borrow_mut(|buf| *buf = Vec::new());
         NORM_BUF.with_borrow_mut(|buf| *buf = Vec::new());
     }
-    crate::parallelism::BACKGROUND_THREAD_POOL.broadcast(|_| release());
+    crate::parallelism::BACKGROUND_THREAD_POOL.spawn_broadcast(|_| release());
     release();
 }
 
@@ -1238,6 +1241,35 @@ fn open_base_dir_fd(base_path: &std::path::Path) -> libc::c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releasing_thread_buffers_does_not_wait_for_a_busy_worker() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (unblock, blocked) = mpsc::channel::<()>();
+        let (started_tx, started) = mpsc::channel::<()>();
+        crate::parallelism::BACKGROUND_THREAD_POOL.spawn(move || {
+            let _ = started_tx.send(());
+            let _ = blocked.recv_timeout(Duration::from_secs(10));
+        });
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking job never started");
+
+        let (done_tx, done) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            release_thread_buffers();
+            let _ = done_tx.send(());
+        });
+        let returned = done.recv_timeout(Duration::from_secs(2)).is_ok();
+        let _ = unblock.send(());
+
+        assert!(
+            returned,
+            "release_thread_buffers waited for a busy background worker"
+        );
+    }
 
     fn sparse_roundtrip(bitset: &[u64]) {
         let mut data = Vec::new();
