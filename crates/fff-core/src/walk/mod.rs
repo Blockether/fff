@@ -397,4 +397,53 @@ mod tests {
         assert_eq!(names, ["ignored/keep.txt", "keep.txt"]);
         assert!(out.dirs.iter().any(|dir| dir == "empty/deep/"));
     }
+
+    // A prefix-free glob walks the base again: it must add only what the
+    // ignore files dropped, once, even when another root overlaps it.
+    #[cfg(feature = "ripgrep")]
+    #[test]
+    fn prefix_free_unignore_globs_add_only_ignored_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".gitignore"), "build/\n*.log\n").unwrap();
+        for path in ["src/.vis", "build/.vis/skills", ".vis"] {
+            fs::create_dir_all(root.join(path)).unwrap();
+        }
+        for path in [
+            "src/main.rs",
+            "src/.vis/notes.md",
+            "src/debug.log",
+            "build/out.bin",
+            "build/.vis/skills/SKILL.md",
+            ".vis/run.log",
+        ] {
+            fs::write(root.join(path), "x").unwrap();
+        }
+
+        let overlay = IgnoreOverlay {
+            unignore_globs: vec!["**/.vis/**".into(), "build/.vis/**".into()],
+            ..Default::default()
+        }
+        .compile(root);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let out = walk_collect_files(root, true, false, true, &overlay, 2, &counter).unwrap();
+        let mut names: Vec<String> = out.pairs.into_iter().map(|(_, rel)| rel).collect();
+        names.sort();
+
+        assert_eq!(
+            names,
+            [
+                ".gitignore",
+                ".vis/run.log",
+                "build/.vis/skills/SKILL.md",
+                "src/.vis/notes.md",
+                "src/main.rs",
+            ]
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), names.len());
+        assert!(out.dirs.iter().any(|dir| dir == "build/.vis/skills/"));
+        assert!(!out.dirs.iter().any(|dir| dir == "build/"));
+    }
 }
