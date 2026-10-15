@@ -1365,6 +1365,7 @@ export function ffiLiveGrep(
   fileOffset: number,
   pageLimit: number,
   timeBudgetMs: number,
+  enforceTimeBudget: boolean,
   beforeContext: number,
   afterContext: number,
   classifyDefinitions: boolean,
@@ -1373,7 +1374,7 @@ export function ffiLiveGrep(
 
   const rawPtr = load({
     library: LIBRARY_KEY,
-    funcName: "fff_live_grep",
+    funcName: "fff_live_grep_ex",
     retType: DataType.External,
     paramsType: [
       DataType.External, // handle
@@ -1385,6 +1386,7 @@ export function ffiLiveGrep(
       DataType.U32, // file_offset
       DataType.U32, // page_limit
       DataType.U64, // time_budget_ms
+      DataType.Boolean, // enforce_time_budget
       DataType.U32, // before_context
       DataType.U32, // after_context
       DataType.Boolean, // classify_definitions
@@ -1399,6 +1401,7 @@ export function ffiLiveGrep(
       fileOffset,
       pageLimit,
       timeBudgetMs,
+      enforceTimeBudget,
       beforeContext,
       afterContext,
       classifyDefinitions,
@@ -1422,6 +1425,7 @@ export function ffiMultiGrep(
   fileOffset: number,
   pageLimit: number,
   timeBudgetMs: number,
+  enforceTimeBudget: boolean,
   beforeContext: number,
   afterContext: number,
   classifyDefinitions: boolean,
@@ -1430,7 +1434,7 @@ export function ffiMultiGrep(
 
   const rawPtr = load({
     library: LIBRARY_KEY,
-    funcName: "fff_multi_grep",
+    funcName: "fff_multi_grep_ex",
     retType: DataType.External,
     paramsType: [
       DataType.External, // handle
@@ -1442,6 +1446,7 @@ export function ffiMultiGrep(
       DataType.U32, // file_offset
       DataType.U32, // page_limit
       DataType.U64, // time_budget_ms
+      DataType.Boolean, // enforce_time_budget
       DataType.U32, // before_context
       DataType.U32, // after_context
       DataType.Boolean, // classify_definitions
@@ -1456,6 +1461,7 @@ export function ffiMultiGrep(
       fileOffset,
       pageLimit,
       timeBudgetMs,
+      enforceTimeBudget,
       beforeContext,
       afterContext,
       classifyDefinitions,
@@ -1616,8 +1622,9 @@ export function ffiGetHistoricalQuery(
 // is only supported as a top-level parameter.
 //
 // Batch contents are read through the C accessors (fff_watch_events_count /
-// fff_watch_events_get_path / fff_watch_events_get_kind), so no struct
-// layout knowledge lives on this side.
+// fff_watch_events_get_path / fff_watch_events_get_kind /
+// fff_watch_events_get_from_path), so no struct layout knowledge lives on
+// this side.
 
 /** Map the C kind byte to the public WatchEventKind. */
 function watchKindFromU8(kind: number): WatchEventKind {
@@ -1628,6 +1635,8 @@ function watchKindFromU8(kind: number): WatchEventKind {
       return "modified";
     case 2:
       return "removed";
+    case 4:
+      return "renamed";
     default:
       return "rescan";
   }
@@ -1685,10 +1694,22 @@ function consumeWatchBatch(address: number): WatchEvent[] {
       paramsType: [DataType.External, DataType.U32],
       paramsValue: [batchPtr, i],
     }) as unknown as number;
-    events.push({
+    const event: WatchEvent = {
       path: readCString(path) ?? "",
       kind: watchKindFromU8(kind),
-    });
+    };
+    if (event.kind === "renamed") {
+      const from = load({
+        library: LIBRARY_KEY,
+        funcName: "fff_watch_events_get_from_path",
+        retType: DataType.External,
+        paramsType: [DataType.External, DataType.U32],
+        paramsValue: [batchPtr, i],
+      }) as unknown as JsExternal;
+      const decoded = readCString(from);
+      if (decoded) event.from = decoded;
+    }
+    events.push(event);
   }
 
   load({

@@ -147,7 +147,8 @@ class GrepCursor:
 
 class WatchEvent:
     path: str
-    kind: Literal["created", "modified", "removed", "rescan"]
+    kind: Literal["created", "modified", "removed", "rescan", "renamed"]
+    from_path: str | None
     def __repr__(self) -> str: ...
 
 class WatchSubscription:
@@ -241,6 +242,7 @@ class FileFinder:
         cursor: GrepCursor | None = None,
         page_limit: int = 0,
         time_budget_ms: int = 0,
+        enforce_time_budget: bool = False,
         before_context: int = 0,
         after_context: int = 0,
         classify_definitions: bool = False,
@@ -257,6 +259,7 @@ class FileFinder:
         cursor: GrepCursor | None = None,
         page_limit: int = 0,
         time_budget_ms: int = 0,
+        enforce_time_budget: bool = False,
         before_context: int = 0,
         after_context: int = 0,
         classify_definitions: bool = False,

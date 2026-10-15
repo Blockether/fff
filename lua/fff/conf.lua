@@ -62,10 +62,17 @@ local M = {}
 --- @field max_file_size number
 --- @field max_matches_per_file number
 --- @field smart_case boolean
+--- @field casing? "smart"|"sensitive"|"insensitive"
 --- @field time_budget_ms number
+--- @field enforce_time_budget boolean
 --- @field modes string[]
 --- @field trim_whitespace boolean
 --- @field location_format string
+--- @field enable_filename_constraint boolean
+
+--- @class FffSuggestionsConfig
+--- @field enabled boolean
+--- @field grep_time_budget_ms number
 
 --- @alias FffSelectAction 'edit' | 'split' | 'vsplit' | 'tab'
 
@@ -97,6 +104,7 @@ local M = {}
 --- @field wrap_around boolean
 --- @field file_picker table
 --- @field grep FffGrepConfig
+--- @field suggestions FffSuggestionsConfig
 
 ---@class fff.conf.State
 local state = {
@@ -426,6 +434,13 @@ local function init()
     -- Git integration
     git = {
       status_text_color = false, -- Apply git status colors to filename text (default: false, only sign column)
+      -- Boost files that participated in recent commits of the current branch:
+      -- +1 score point per commit the file appeared in (max = max_commits)
+      recency = {
+        enabled = true,
+        max_commits = 10, -- Analyze the last N branch-specific commits
+        max_files_per_commit = 50, -- Skip bulk commits (merges, refactors) touching more files
+      },
     },
     debug = {
       enabled = false, -- Show file info panel in preview
@@ -457,12 +472,19 @@ local function init()
       current_file_label = '(current)',
       fuzzy_query_highlighting = false,
     },
+    -- Cross-mode suggestions shown when a query has no results
+    suggestions = {
+      enabled = true,
+      grep_time_budget_ms = 50, -- Hard cap for the grep hint in file mode (it never runs before content indexing finishes)
+    },
     -- grep settings
     grep = {
       max_file_size = 10 * 1024 * 1024, -- Skip files larger than 10MB
       max_matches_per_file = 100, -- Maximum matches per file (set 0 to unlimited)
       smart_case = true, -- Case-insensitive unless query has uppercase
+      casing = nil, -- "smart" | "sensitive" | "insensitive"; overrides smart_case when set
       time_budget_ms = 150, -- Max search time in ms per call (prevents UI freeze, 0 = no limit)
+      enforce_time_budget = false, -- Apply time_budget_ms even before anything matched (off = zero-match queries scan everything)
       modes = { 'plain', 'regex', 'fuzzy' }, -- Available grep modes and their cycling order
       trim_whitespace = false, -- Strip leading whitespace from matched lines (useful for cleaner display)
       -- Treat filename-like tokens (e.g. `score.rs`, `src/main.rs`) in a grep query as a

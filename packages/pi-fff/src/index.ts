@@ -14,7 +14,10 @@ import type {
 import {
   type AutocompleteItem,
   type AutocompleteProvider,
+  type Component,
+  sliceByColumn,
   Text,
+  visibleWidth,
 } from "@earendil-works/pi-tui";
 import type {
   FileFinderApi,
@@ -28,7 +31,7 @@ import { Type, type TSchema } from "@sinclair/typebox";
 import { AuxFinderPool, routePathConstraint } from "./aux-finders";
 import { type FffMode, loadConfig, VALID_MODES } from "./config";
 import { FilePickerFactory } from "./file-picker";
-import { isHomeDir, resolveDbPaths } from "./paths";
+import { isFsRoot, isHomeDir, resolveDbPaths } from "./paths";
 import { buildQuery } from "./query";
 
 export { SCAN_TIMEOUT_MS } from "./sdk";
@@ -76,6 +79,10 @@ const OVERRIDE_TOOL_NAMES: ToolNames = {
 
 function resolveToolNames(mode: FffMode): ToolNames {
   return mode === "override" ? OVERRIDE_TOOL_NAMES : FFF_TOOL_NAMES;
+}
+
+function toolNameList(names: ToolNames): string[] {
+  return [names.grep, names.find, names.multiGrep];
 }
 
 // ---------------------------------------------------------------------------
@@ -460,8 +467,22 @@ export default function fffExtension(pi: ExtensionAPI) {
     });
   }
 
+  // The native layer refuses a picker rooted at $HOME / the fs root unless the
+  // matching opt-in is set (crates/fff-core/src/file_picker.rs). Detect that here
+  // so the opt-out reads as "search off" instead of an init failure (issue #857).
+  function scanOptOutReason(cwd: string): string | null {
+    if (!enableHomeDirScanning && isHomeDir(cwd))
+      return `(fff): cwd is $HOME and "enableHomeDirScanning" is false, so FFF search is disabled for this session. Start pi from a project directory, or set "enableHomeDirScanning": true / --fff-enable-home-scan=true to index $HOME.`;
+    if (!enableFsRootScanning && isFsRoot(cwd))
+      return `(fff): cwd is the filesystem root and "enableFsRootScanning" is false, so FFF search is disabled for this session. Start pi from a project directory, or set "enableFsRootScanning": true / --fff-enable-root-scan=true to index it.`;
+    return null;
+  }
+
   // in case cwd changes we need to figure this out
   function ensureFinder(cwd: string): Promise<FileFinderApi> {
+    const optOut = scanOptOutReason(cwd);
+    if (optOut) return Promise.reject(new Error(optOut));
+
     if (mainFinder && !mainFinder.isDestroyed && finderCwd === cwd)
       return Promise.resolve(mainFinder);
 
@@ -637,30 +658,66 @@ export default function fffExtension(pi: ExtensionAPI) {
   };
 
   const pendingTools: (() => string)[] = [];
+  const registeredToolNames = new Set<string>();
+  // A renderer is attached to a concrete registered name. Keep that name outside
+  // row state so old fffgrep rows retain their title after mode changes to override.
+  const renderToolNames = new WeakMap<object, string>();
   let toolsRegistered = false;
+
+  function getRenderToolName(context: object, fallback: string): string {
+    return renderToolNames.get(context) ?? fallback;
+  }
+
+  function registerTool<TParams extends TSchema, TDetails = unknown, TState = any>(
+    resolveName: () => string,
+    definition: PendingToolDefinition<TParams, TDetails, TState>,
+  ): string {
+    const resolvedName = resolveName();
+    if (registeredToolNames.has(resolvedName)) return resolvedName;
+
+    const { promptGuidelines, renderCall, ...tool } = definition;
+    pi.registerTool({
+      ...tool,
+      name: resolvedName,
+      label: resolvedName,
+      promptGuidelines: promptGuidelines?.(toolNames),
+      renderCall: renderCall
+        ? (args, theme, context) => {
+            renderToolNames.set(context, resolvedName);
+            return renderCall(args, theme, context);
+          }
+        : undefined,
+    });
+    registeredToolNames.add(resolvedName);
+    return resolvedName;
+  }
 
   function queueTool<TParams extends TSchema, TDetails = unknown, TState = any>(
     resolveName: () => string,
     definition: PendingToolDefinition<TParams, TDetails, TState>,
   ): void {
-    pendingTools.push(() => {
-      const { promptGuidelines, ...tool } = definition;
-      const resolvedName = resolveName();
-      pi.registerTool({
-        ...tool,
-        name: resolvedName,
-        label: resolvedName,
-        promptGuidelines: promptGuidelines?.(toolNames),
-      });
-      return resolvedName;
-    });
+    pendingTools.push(() => registerTool(resolveName, definition));
+
+    // Pi restores historical tool rows before session_start. Register the
+    // FFF-named tools now so their renderers resolve. Pi activates every
+    // newly registered tool, so registerPendingTools prunes the names the
+    // final mode did not select.
+    registerTool(resolveName, definition);
   }
 
-  function registerPendingTools(): void {
+  // Pi carries the active tool list across /reload, so names activated under a
+  // previously used mode stay active unless we drop them here (#855).
+  function registerPendingTools(staleNames: readonly string[]): void {
     if (toolsRegistered) return;
 
-    const registeredNames = pendingTools.map((register) => register());
-    pi.setActiveTools([...new Set([...pi.getActiveTools(), ...registeredNames])]);
+    const registeredNames = new Set(pendingTools.map((register) => register()));
+    const stale = new Set(staleNames.filter((name) => !registeredNames.has(name)));
+    pi.setActiveTools([
+      ...new Set([
+        ...pi.getActiveTools().filter((name) => !stale.has(name)),
+        ...registeredNames,
+      ]),
+    ]);
     toolsRegistered = true;
   }
 
@@ -720,34 +777,51 @@ export default function fffExtension(pi: ExtensionAPI) {
     // Pi populates extension flag values after loading extensions.
     resolveStartupConfig();
 
+    // FFF-named tools are ours alone, so they are always safe to drop. Override
+    // names collide with pi's builtins and are only stale once this session ran
+    // in override mode, which is the sole way we could have activated them.
+    const staleNames = toolNameList(FFF_TOOL_NAMES);
+    let usedOverride = currentMode === "override";
+
     // Restore persisted mode before registering tools so a saved override
     // can safely change their names after /reload or session resume.
-    const entries = ctx.sessionManager?.getEntries();
-    if (entries) {
-      const modeEntry = [...entries]
-        .reverse()
-        .find(
-          (e: { type: string; customType?: string }) =>
-            e.type === "custom" && e.customType === "fff-mode",
-        );
-      if (
-        modeEntry &&
-        typeof (modeEntry as any).data?.mode === "string" &&
-        VALID_MODES.includes((modeEntry as any).data.mode as FffMode)
-      ) {
-        const restored = (modeEntry as any).data.mode as FffMode;
-        if (restored !== currentMode) setMode(restored);
-      }
+    const modes = sessionModes(ctx.sessionManager?.getEntries());
+    if (modes.length > 0) {
+      const restored = modes[modes.length - 1];
+      if (restored !== currentMode) setMode(restored);
+      usedOverride = usedOverride || modes.includes("override");
     }
 
     initializeFinderFactories();
-    registerPendingTools();
+
+    // `override` replaces pi's built-in grep/find. With the cwd opted out of
+    // indexing that would leave the session without any working workspace
+    // search, so keep the FFF names and let the built-ins stand (issue #857).
+    const keepBuiltins =
+      currentMode === "override" && scanOptOutReason(activeCwd) !== null;
+    if (keepBuiltins) toolNames = FFF_TOOL_NAMES;
+
+    // Pruning the override names here would deactivate the built-ins #857 just
+    // chose to keep, so only prune once FFF really takes those names over.
+    if (usedOverride && !keepBuiltins)
+      staleNames.push(...toolNameList(OVERRIDE_TOOL_NAMES));
+
+    registerPendingTools(staleNames);
   }
 
   pi.on("session_start", async (_event, ctx) => {
     try {
       prepareSession(ctx);
       registerAutocompleteProvider(ctx);
+
+      // The user opted out of indexing this cwd, so skip the picker entirely
+      // instead of letting the native refusal surface as an error (issue #857).
+      const optOut = scanOptOutReason(activeCwd);
+      if (optOut) {
+        ctx.ui.notify(optOut, "warning");
+        return;
+      }
+
       await ensureFinder(activeCwd);
 
       // Warn when launched from $HOME with home scanning on: indexing a large
@@ -786,7 +860,72 @@ export default function fffExtension(pi: ExtensionAPI) {
 
   // --- Shared render helpers ---
 
-  const renderTextResult = (
+  class CollapsedText implements Component {
+    constructor(
+      private readonly preview: string,
+      private readonly suffix: string,
+      private readonly marker: string,
+    ) {}
+
+    render(width: number): string[] {
+      const availableWidth = Math.max(1, width);
+      if (!this.suffix) {
+        if (visibleWidth(this.preview) <= availableWidth) return [this.preview];
+        const markerWidth = visibleWidth(this.marker);
+        if (markerWidth >= availableWidth) {
+          return [sliceByColumn(this.marker, 0, availableWidth, true)];
+        }
+        return [
+          `${sliceByColumn(this.preview, 0, availableWidth - markerWidth, true)}${this.marker}`,
+        ];
+      }
+
+      const suffixWidth = visibleWidth(this.suffix);
+      if (suffixWidth >= availableWidth) {
+        return [sliceByColumn(this.suffix, 0, availableWidth, true)];
+      }
+
+      const previewWidth = availableWidth - suffixWidth - 1;
+      if (visibleWidth(this.preview) <= previewWidth) {
+        return [`${this.preview} ${this.suffix}`];
+      }
+
+      const markerWidth = visibleWidth(this.marker);
+      return [
+        `${sliceByColumn(this.preview, 0, Math.max(0, previewWidth - markerWidth), true)}${this.marker} ${this.suffix}`,
+      ];
+    }
+
+    invalidate(): void {}
+  }
+
+  // Pi wraps returned components in its own click-to-expand MouseRegion and passes
+  // the toggled state via options.expanded, so no custom mouse handling is needed.
+  const renderCompactTextResult = (
+    result: { content?: { type: string; text?: string }[] },
+    options: { expanded?: boolean },
+    theme: any,
+    context: any,
+  ): Component => {
+    const output = result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
+    if (!output) return new Text(theme.fg("muted", "No output"), 0, 0);
+
+    const lines = output.split("\n");
+    const color = context.isError ? "error" : "toolOutput";
+    if (options.expanded) {
+      return new Text(lines.map((line) => theme.fg(color, line)).join("\n"), 0, 0);
+    }
+
+    const suffix =
+      lines.length > 1 ? theme.fg("muted", `... (${lines.length - 1} more lines)`) : "";
+    return new CollapsedText(
+      theme.fg(color, lines[0] ?? ""),
+      suffix,
+      theme.fg("muted", "..."),
+    );
+  };
+
+  const renderPreviewResult = (
     result: { content?: { type: string; text?: string }[] },
     options: { expanded?: boolean },
     theme: any,
@@ -993,23 +1132,24 @@ export default function fffExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, context) {
-      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
       const path = args?.path ?? ".";
       let content =
-        theme.fg("toolTitle", theme.bold(toolNames.grep)) +
+        theme.fg("toolTitle", theme.bold(getRenderToolName(context, toolNames.grep))) +
         " " +
         theme.fg("accent", `/${pattern}/`) +
         theme.fg("toolOutput", ` in ${path}`);
-      if (args?.limit !== undefined)
-        content += theme.fg("toolOutput", ` limit ${args.limit}`);
+      const options: string[] = [];
+      if (args?.limit !== undefined) options.push(`limit ${args.limit}`);
+      if (args?.context !== undefined) options.push(`context ${args.context}`);
+      if (options.length > 0)
+        content += theme.fg("toolOutput", ` (${options.join(", ")})`);
       if (args?.cursor) content += theme.fg("muted", ` (page)`);
-      text.setText(content);
-      return text;
+      return new CollapsedText(content, "", theme.fg("muted", "..."));
     },
 
     renderResult(result, options, theme, context) {
-      return renderTextResult(result, options, theme, context, 15);
+      return renderCompactTextResult(result, options, theme, context);
     },
   });
 
@@ -1136,23 +1276,21 @@ export default function fffExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, context) {
-      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
       const path = args?.path ?? ".";
       let content =
-        theme.fg("toolTitle", theme.bold(toolNames.find)) +
+        theme.fg("toolTitle", theme.bold(getRenderToolName(context, toolNames.find))) +
         " " +
         theme.fg("accent", pattern) +
         theme.fg("toolOutput", ` in ${path}`);
       if (args?.limit !== undefined)
         content += theme.fg("toolOutput", ` (limit ${args.limit})`);
       if (args?.cursor) content += theme.fg("muted", ` (page)`);
-      text.setText(content);
-      return text;
+      return new CollapsedText(content, "", theme.fg("muted", "..."));
     },
 
     renderResult(result, options, theme, context) {
-      return renderTextResult(result, options, theme, context, 20);
+      return renderCompactTextResult(result, options, theme, context);
     },
   });
 
@@ -1244,7 +1382,10 @@ export default function fffExtension(pi: ExtensionAPI) {
         const patterns = args?.patterns ?? [];
         const constraints = args?.constraints;
         let content =
-          theme.fg("toolTitle", theme.bold(toolNames.multiGrep)) +
+          theme.fg(
+            "toolTitle",
+            theme.bold(getRenderToolName(context, toolNames.multiGrep)),
+          ) +
           " " +
           theme.fg("accent", patterns.map((p: string) => `"${p}"`).join(", "));
         if (constraints) content += theme.fg("toolOutput", ` (${constraints})`);
@@ -1254,7 +1395,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       },
 
       renderResult(result, options, theme, context) {
-        return renderTextResult(result, options, theme, context, 15);
+        return renderPreviewResult(result, options, theme, context, 15);
       },
     });
   } // end if (enableMultiGrep)
@@ -1357,4 +1498,23 @@ export default function fffExtension(pi: ExtensionAPI) {
       ctx.ui.notify("FFF rescan triggered", "info");
     },
   });
+}
+
+// Every mode this session selected via /fff-mode, oldest first.
+function sessionModes(entries: unknown): FffMode[] {
+  if (!Array.isArray(entries)) return [];
+
+  const modes: FffMode[] = [];
+  for (const entry of entries as {
+    type?: string;
+    customType?: string;
+    data?: unknown;
+  }[]) {
+    if (entry?.type !== "custom" || entry.customType !== "fff-mode") continue;
+    const mode = (entry.data as { mode?: unknown } | undefined)?.mode;
+    if (typeof mode === "string" && VALID_MODES.includes(mode as FffMode)) {
+      modes.push(mode as FffMode);
+    }
+  }
+  return modes;
 }

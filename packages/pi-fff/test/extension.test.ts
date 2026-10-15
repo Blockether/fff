@@ -67,10 +67,27 @@ function createMockFinder(): MockFinder {
   };
 }
 
+const NATIVE_ROOT_REFUSAL =
+  "Failed to init file picker: Can not run certain FFF features in a file system root or home directories. Consider smaller per-project directories.";
+
+// Mirrors the native guard in crates/fff-core/src/file_picker.rs: a picker rooted
+// at $HOME or `/` is refused unless the matching opt-in is set.
+function nativeRefusal(options: {
+  basePath: string;
+  enableHomeDirScanning?: boolean;
+  enableFsRootScanning?: boolean;
+}): boolean {
+  const base = path.resolve(options.basePath);
+  if (options.enableHomeDirScanning === false && base === path.resolve(os.homedir()))
+    return true;
+  return options.enableFsRootScanning === false && path.dirname(base) === base;
+}
+
 const finderModule = {
   FileFinder: {
-    create: mock((options: unknown) => {
+    create: mock((options: any) => {
       createCalls.push(options);
+      if (nativeRefusal(options)) return { ok: false, error: NATIVE_ROOT_REFUSAL };
       const finder = createMockFinder();
       finders.push(finder);
       return { ok: true, value: finder };
@@ -82,6 +99,12 @@ mock.module("@ff-labs/fff-node", () => finderModule);
 mock.module("@ff-labs/fff-bun", () => finderModule);
 
 mock.module("@earendil-works/pi-tui", () => ({
+  MouseRegion: class MouseRegion {
+    constructor(
+      public component: any,
+      public onMouse: (event: any) => unknown,
+    ) {}
+  },
   Text: class Text {
     text: string;
     constructor(text: string) {
@@ -91,6 +114,8 @@ mock.module("@earendil-works/pi-tui", () => ({
       this.text = text;
     }
   },
+  sliceByColumn: (text: string, _start: number, end: number) => text.slice(0, end),
+  visibleWidth: (text: string) => text.length,
 }));
 
 const schema = (type: string) => (options?: unknown) => ({ type, options });
@@ -147,7 +172,7 @@ function createPi(mode?: string, flags: Record<string, unknown> = {}) {
     registerTool: mock((_tool: any) => undefined),
     getActiveTools: mock(() => ["read"] as string[]),
     setActiveTools: mock((_names: string[]) => undefined),
-    appendEntry: mock(() => undefined),
+    appendEntry: mock((_customType: string, _data: unknown) => undefined),
   };
 
   return { pi, events, commands };
@@ -251,9 +276,12 @@ describe("pi-fff global config", () => {
     const setup = await start();
     const toolNames = setup.pi.registerTool.mock.calls.map(([tool]) => tool.name);
 
-    expect(toolNames).toContain("grep");
-    expect(toolNames).toContain("find");
-    expect(toolNames).not.toContain("ffgrep");
+    expect(toolNames).toEqual(
+      expect.arrayContaining(["ffgrep", "fffind", "grep", "find"]),
+    );
+    expect(setup.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["ffgrep", "fffind"]),
+    );
     expect(createCalls[0]).toEqual({
       basePath: "/tmp/workspace",
       frecencyDbPath: "/config/frecency",
@@ -320,9 +348,12 @@ describe("pi-fff global config", () => {
     const setup = await start("invalid-flag-mode");
     const toolNames = setup.pi.registerTool.mock.calls.map(([tool]) => tool.name);
 
-    expect(toolNames).toContain("grep");
-    expect(toolNames).toContain("find");
-    expect(toolNames).not.toContain("ffgrep");
+    expect(toolNames).toEqual(
+      expect.arrayContaining(["ffgrep", "fffind", "grep", "find"]),
+    );
+    expect(setup.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["ffgrep", "fffind"]),
+    );
     await shutdown(setup);
   });
 });
@@ -332,7 +363,7 @@ function writeConfig(config: Record<string, unknown>): void {
 }
 
 describe("pi-fff session mode", () => {
-  test("registers tools only after restoring the saved mode", async () => {
+  test("pre-registers FFF renderers before restoring the saved mode", async () => {
     const setup = createPi("tools-and-ui");
     const ctx = createContext();
     ctx.sessionManager.getEntries.mockReturnValue([
@@ -340,19 +371,42 @@ describe("pi-fff session mode", () => {
     ]);
     fffExtension(setup.pi as any);
 
-    expect(setup.pi.registerTool).not.toHaveBeenCalled();
+    expect(setup.pi.registerTool.mock.calls.map(([tool]) => tool.name)).toEqual([
+      "ffgrep",
+      "fffind",
+    ]);
+    expect(setup.pi.setActiveTools).not.toHaveBeenCalled();
     await setup.events.get("session_start")?.({ reason: "startup" }, ctx);
 
     const tools = setup.pi.registerTool.mock.calls.map(([tool]) => tool);
     const toolNames = tools.map((tool) => tool.name);
-    expect(toolNames).toContain("grep");
-    expect(toolNames).toContain("find");
-    expect(toolNames).not.toContain("ffgrep");
-    expect(toolNames).not.toContain("fffind");
-    const grepTool = tools.find((tool) => tool.name === "grep");
-    expect(grepTool.promptGuidelines[0].startsWith("grep:")).toBe(true);
+    expect(toolNames).toEqual(
+      expect.arrayContaining(["ffgrep", "fffind", "grep", "find"]),
+    );
+    const historicalGrep = tools.find((tool) => tool.name === "ffgrep");
+    const activeGrep = tools.find((tool) => tool.name === "grep");
+    const theme = {
+      bold: (text: string) => text,
+      fg: (_color: string, text: string) => text,
+    };
+    const historicalCall = historicalGrep.renderCall(
+      { pattern: "TODO", path: "." },
+      theme,
+      { state: {}, invalidate: mock(() => undefined), isError: false },
+    );
+    const activeCall = activeGrep.renderCall({ pattern: "TODO", path: "." }, theme, {
+      state: {},
+      invalidate: mock(() => undefined),
+      isError: false,
+    });
+    expect(historicalCall.render(80)).toEqual(["ffgrep /TODO/ in ."]);
+    expect(activeCall.render(80)).toEqual(["grep /TODO/ in ."]);
+    expect(activeGrep.promptGuidelines[0].startsWith("grep:")).toBe(true);
     expect(setup.pi.setActiveTools).toHaveBeenCalledWith(
       expect.arrayContaining(["read", "grep", "find"]),
+    );
+    expect(setup.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["ffgrep", "fffind"]),
     );
 
     await setup.commands.get("fff-mode").handler("", ctx);
@@ -363,17 +417,47 @@ describe("pi-fff session mode", () => {
     await shutdown(setup);
   });
 
+  test("prunes auto-activated FFF names when override is the final mode", async () => {
+    const setup = createPi("tools-and-ui");
+    const ctx = createContext();
+    ctx.sessionManager.getEntries.mockReturnValue([
+      { type: "custom", customType: "fff-mode", data: { mode: "override" } },
+    ]);
+    fffExtension(setup.pi as any);
+
+    // Pi core activates every newly registered tool, so the early FFF
+    // registrations are active by the time session_start runs.
+    setup.pi.getActiveTools.mockReturnValue(["read", "ffgrep", "fffind"]);
+    await setup.events.get("session_start")?.({ reason: "startup" }, ctx);
+
+    expect(setup.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.arrayContaining(["read", "grep", "find"]),
+    );
+    expect(setup.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["ffgrep", "fffind"]),
+    );
+    await shutdown(setup);
+  });
+
   test("registers tools before an unbound SDK session's first agent turn", async () => {
     const setup = createPi("override");
     const ctx = createContext();
     fffExtension(setup.pi as any);
 
-    expect(setup.pi.registerTool).not.toHaveBeenCalled();
+    expect(setup.pi.registerTool.mock.calls.map(([tool]) => tool.name)).toEqual([
+      "ffgrep",
+      "fffind",
+    ]);
+    expect(setup.pi.setActiveTools).not.toHaveBeenCalled();
     await setup.events.get("before_agent_start")?.({}, ctx);
 
     const toolNames = setup.pi.registerTool.mock.calls.map(([tool]) => tool.name);
-    expect(toolNames).toContain("grep");
-    expect(toolNames).toContain("find");
+    expect(toolNames).toEqual(
+      expect.arrayContaining(["ffgrep", "fffind", "grep", "find"]),
+    );
+    expect(setup.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["ffgrep", "fffind"]),
+    );
     expect(createCalls).toHaveLength(0);
     await shutdown(setup);
   });
@@ -396,6 +480,109 @@ describe("pi-fff session mode", () => {
       "Current mode: 'tools-and-ui' (flag: unset)",
       "info",
     );
+    await shutdown(setup);
+  });
+});
+
+// Regression for #855: pi carries the active tool list and the session entries across
+// /reload, but drops the extension instance, so a mode switch must not leave the
+// previous mode's tool names active.
+describe("pi-fff mode switch across /reload", () => {
+  // Pi's own default active set: builtin grep/find ship inactive (dist/core/sdk.js).
+  const PI_DEFAULT_ACTIVE = ["read", "bash", "edit", "write"];
+
+  function createReloadableSession(
+    startupMode?: string,
+    active = PI_DEFAULT_ACTIVE,
+    cwd?: string,
+  ) {
+    let activeTools = [...active];
+    const entries: unknown[] = [];
+
+    async function load() {
+      const setup = createPi(startupMode);
+      setup.pi.getActiveTools.mockImplementation(() => [...activeTools]);
+      setup.pi.setActiveTools.mockImplementation((names: string[]) => {
+        activeTools = [...names];
+      });
+      setup.pi.appendEntry.mockImplementation((customType: string, data: unknown) => {
+        entries.push({ type: "custom", customType, data });
+      });
+
+      const ctx = createContext(cwd);
+      ctx.sessionManager.getEntries.mockReturnValue(entries as any[]);
+      fffExtension(setup.pi as any);
+      await setup.events.get("session_start")?.({ reason: "startup" }, ctx);
+      return { ...setup, ctx };
+    }
+
+    return { load, getActiveTools: () => activeTools };
+  }
+
+  test("drops override tool names when switching back to a FFF-named mode", async () => {
+    const session = createReloadableSession("override");
+
+    const first = await session.load();
+    expect(session.getActiveTools()).toEqual([...PI_DEFAULT_ACTIVE, "grep", "find"]);
+    await first.commands.get("fff-mode").handler("tools-and-ui", first.ctx);
+    await shutdown(first);
+
+    const second = await session.load();
+    expect(session.getActiveTools()).toEqual([...PI_DEFAULT_ACTIVE, "ffgrep", "fffind"]);
+    await shutdown(second);
+  });
+
+  test("drops FFF tool names when switching to override", async () => {
+    const session = createReloadableSession("tools-and-ui");
+
+    const first = await session.load();
+    expect(session.getActiveTools()).toEqual([...PI_DEFAULT_ACTIVE, "ffgrep", "fffind"]);
+    await first.commands.get("fff-mode").handler("override", first.ctx);
+    await shutdown(first);
+
+    const second = await session.load();
+    expect(session.getActiveTools()).toEqual([...PI_DEFAULT_ACTIVE, "grep", "find"]);
+    await shutdown(second);
+  });
+
+  test("keeps user-enabled builtin grep and find when override was never used", async () => {
+    const session = createReloadableSession("tools-and-ui", [
+      ...PI_DEFAULT_ACTIVE,
+      "grep",
+      "find",
+    ]);
+
+    const setup = await session.load();
+
+    expect(session.getActiveTools()).toEqual([
+      ...PI_DEFAULT_ACTIVE,
+      "grep",
+      "find",
+      "ffgrep",
+      "fffind",
+    ]);
+    await shutdown(setup);
+  });
+
+  // #857 keeps pi's built-ins when the cwd is opted out of indexing, so the
+  // override prune must not deactivate them behind its back.
+  test("keeps builtin grep and find when override falls back on an opted-out cwd", async () => {
+    process.env.FFF_ENABLE_HOME_SCAN = "0";
+    const session = createReloadableSession(
+      "override",
+      [...PI_DEFAULT_ACTIVE, "grep", "find"],
+      os.homedir(),
+    );
+
+    const setup = await session.load();
+
+    expect(session.getActiveTools()).toEqual([
+      ...PI_DEFAULT_ACTIVE,
+      "grep",
+      "find",
+      "ffgrep",
+      "fffind",
+    ]);
     await shutdown(setup);
   });
 });
@@ -452,12 +639,41 @@ describe("pi-fff $HOME scan warning", () => {
     expect(setup.ctx.ui.setStatus).toHaveBeenLastCalledWith("fff", undefined);
   });
 
-  test("no warning when home scanning is disabled", async () => {
+  // #857: the opt-out must skip the picker, not surface the native refusal as an
+  // init error, and must not shadow pi's built-in search tools in override mode.
+  test("skips the picker and stays out of the way when home scanning is off", async () => {
     process.env.FFF_ENABLE_HOME_SCAN = "0";
+    const setup = await start("override", os.homedir());
+
+    expect(createCalls).toHaveLength(0);
+    expect(setup.ctx.ui.setStatus).not.toHaveBeenCalled();
+
+    const [message, level] = setup.ctx.ui.notify.mock.calls[0];
+    expect(setup.ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(level).toBe("warning");
+    expect(message).not.toContain("FFF init failed");
+    expect(message).toContain("enableHomeDirScanning");
+
+    const toolNames = setup.pi.registerTool.mock.calls.map(([tool]) => tool.name);
+    expect(toolNames).toEqual(["ffgrep", "fffind"]);
+    await shutdown(setup);
+  });
+
+  test("skips the picker at the filesystem root without root scanning", async () => {
+    const setup = await start(undefined, path.parse(process.cwd()).root);
+
+    expect(createCalls).toHaveLength(0);
+    const [message, level] = setup.ctx.ui.notify.mock.calls[0];
+    expect(level).toBe("warning");
+    expect(message).toContain("enableFsRootScanning");
+    await shutdown(setup);
+  });
+
+  test("still indexes $HOME when the opt-out is not set", async () => {
     const setup = await start(undefined, os.homedir());
 
-    expect(setup.ctx.ui.notify).not.toHaveBeenCalled();
-    expect(setup.ctx.ui.setStatus).not.toHaveBeenCalled();
+    expect(createCalls).toHaveLength(1);
+    expect((createCalls[0] as { basePath: string }).basePath).toBe(os.homedir());
     await shutdown(setup);
   });
 
@@ -680,6 +896,63 @@ describe("pi-fff autocomplete registration", () => {
     expect(shouldTrigger).toBe(false);
     expect(current.applyCompletion).toHaveBeenCalledTimes(1);
     expect(current.shouldTriggerFileCompletion).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("compact tool rendering", () => {
+  const theme = {
+    bold: (text: string) => text,
+    fg: (_color: string, text: string) => text,
+  };
+
+  function toolByName(
+    setup: { pi: { registerTool: ReturnType<typeof mock> } },
+    name: string,
+  ) {
+    const tool = setup.pi.registerTool.mock.calls
+      .map(([tool]) => tool)
+      .find((tool) => tool.name === name);
+    expect(tool).toBeDefined();
+    return tool;
+  }
+
+  test("ffgrep renders collapsed by default and full when pi reports expanded", async () => {
+    const setup = await start("tools-and-ui");
+    const tool = toolByName(setup, "ffgrep");
+    const context = { state: {}, invalidate: mock(() => undefined), isError: false };
+
+    const call = tool.renderCall(
+      { pattern: "TODO", path: ".", limit: 3, context: 2 },
+      theme,
+      context,
+    );
+    expect(call.render(80)).toEqual(["ffgrep /TODO/ in . (limit 3, context 2)"]);
+
+    const defaultCall = tool.renderCall({ pattern: "TODO", path: "." }, theme, context);
+    expect(defaultCall.render(80)).toEqual(["ffgrep /TODO/ in ."]);
+
+    const content = [{ type: "text", text: "first\nsecond\nthird" }];
+    const collapsed = tool.renderResult({ content }, { expanded: false }, theme, context);
+    expect(collapsed.render(80)).toEqual(["first ... (2 more lines)"]);
+
+    const expanded = tool.renderResult({ content }, { expanded: true }, theme, context);
+    expect(expanded.text).toBe("first\nsecond\nthird");
+  });
+
+  test("fffind result follows the expanded option", async () => {
+    const setup = await start("tools-and-ui");
+    const tool = toolByName(setup, "fffind");
+    const context = { state: {}, invalidate: mock(() => undefined), isError: false };
+
+    const call = tool.renderCall({ pattern: "index", path: "src" }, theme, context);
+    expect(call.render(80)).toEqual(["fffind index in src"]);
+
+    const content = [{ type: "text", text: "src/index.ts\nsrc/main.ts" }];
+    const collapsed = tool.renderResult({ content }, { expanded: false }, theme, context);
+    expect(collapsed.render(80)).toEqual(["src/index.ts ... (1 more lines)"]);
+
+    const expanded = tool.renderResult({ content }, { expanded: true }, theme, context);
+    expect(expanded.text).toBe("src/index.ts\nsrc/main.ts");
   });
 });
 

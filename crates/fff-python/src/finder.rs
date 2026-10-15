@@ -86,6 +86,7 @@ fn grep_options(
     smart_case: bool,
     page_limit: u32,
     time_budget_ms: u64,
+    enforce_time_budget: bool,
     before_context: u32,
     after_context: u32,
     classify_definitions: bool,
@@ -95,10 +96,12 @@ fn grep_options(
         max_file_size: defaulted_u64(max_file_size, defaults.max_file_size),
         max_matches_per_file: max_matches_per_file as usize,
         smart_case,
+        casing: None,
         file_offset: cursor_offset,
         page_limit: defaulted_usize(page_limit, defaults.page_limit),
         mode,
         time_budget_ms,
+        enforce_time_budget,
         before_context: before_context as usize,
         after_context: after_context as usize,
         classify_definitions,
@@ -257,6 +260,7 @@ impl FileFinder {
                     ignore_overlay: Default::default(),
                     enable_fs_root_scanning,
                     enable_home_dir_scanning,
+                    git_recency: Default::default(),
                 },
             )
             .map_err(py_err)
@@ -599,6 +603,7 @@ impl FileFinder {
         cursor=None,
         page_limit=0,
         time_budget_ms=0,
+        enforce_time_budget=false,
         before_context=0,
         after_context=0,
         classify_definitions=false,
@@ -614,6 +619,7 @@ impl FileFinder {
         cursor: Option<&GrepCursor>,
         page_limit: u32,
         time_budget_ms: u64,
+        enforce_time_budget: bool,
         before_context: u32,
         after_context: u32,
         classify_definitions: bool,
@@ -642,6 +648,7 @@ impl FileFinder {
                 smart_case,
                 page_limit,
                 time_budget_ms,
+                enforce_time_budget,
                 before_context,
                 after_context,
                 classify_definitions,
@@ -663,6 +670,7 @@ impl FileFinder {
         cursor=None,
         page_limit=0,
         time_budget_ms=0,
+        enforce_time_budget=false,
         before_context=0,
         after_context=0,
         classify_definitions=false,
@@ -679,6 +687,7 @@ impl FileFinder {
         cursor: Option<&GrepCursor>,
         page_limit: u32,
         time_budget_ms: u64,
+        enforce_time_budget: bool,
         before_context: u32,
         after_context: u32,
         classify_definitions: bool,
@@ -713,6 +722,7 @@ impl FileFinder {
                 smart_case,
                 page_limit,
                 time_budget_ms,
+                enforce_time_budget,
                 before_context,
                 after_context,
                 classify_definitions,
@@ -747,7 +757,7 @@ impl FileFinder {
     /// Patterns may be base-relative globs (./ works), exact paths inside the indexed
     /// tree, or existing directories. An empty pattern watches the whole tree.
     ///
-    /// Events are debounced and submitted in batches per 100-ms window at most 128 events.
+    /// Events are debounced over a 50-ms window and submitted in batches of at most 128 events.
     /// Gitignored and other ignored files are never triggering watcher.
     #[pyo3(signature = (pattern, callback, *, ignore = None))]
     fn watch(
@@ -784,6 +794,10 @@ impl FileFinder {
                             .map(|ev| WatchEvent {
                                 path: ev.path.to_string_lossy().to_string(),
                                 kind: ev.kind.as_str().to_string(),
+                                from_path: ev
+                                    .from
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string()),
                             })
                             .collect();
                         if let Err(e) = callback.call1(py, (batch,)) {
@@ -823,6 +837,7 @@ impl FileFinder {
                 home_dir,
                 follow_symlinks,
                 respect_ignore_files,
+                git_recency,
             ) = {
                 let guard = picker.read().map_err(py_err)?;
                 if let Some(ref picker) = *guard {
@@ -835,9 +850,11 @@ impl FileFinder {
                         picker.home_dir_scanning_enabled(),
                         picker.follows_symlinks(),
                         picker.respects_ignore_files(),
+                        picker.git_recency_config(),
                     )
                 } else {
                     (
+                        // just the defaults
                         false,
                         true,
                         true,
@@ -846,6 +863,7 @@ impl FileFinder {
                         false,
                         false,
                         true,
+                        Default::default(),
                     )
                 }
             };
@@ -870,6 +888,7 @@ impl FileFinder {
                     ignore_overlay: Default::default(),
                     enable_fs_root_scanning: fs_root,
                     enable_home_dir_scanning: home_dir,
+                    git_recency,
                 },
             )
             .map_err(py_err)

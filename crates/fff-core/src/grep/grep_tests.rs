@@ -46,7 +46,7 @@ fn test_fuzzy_typo_scoring() {
     let max_typos = (needle.len() / 3).min(2); // 2
     let config = neo_frizbee::Config {
         max_typos: Some(max_typos as u16),
-        sort: false,
+        sort: neo_frizbee::SortStrategy::Unsorted,
         scoring: neo_frizbee::Scoring {
             exact_match_bonus: 100,
             ..neo_frizbee::Scoring::default()
@@ -58,7 +58,8 @@ fn test_fuzzy_typo_scoring() {
 
     // Helper: check if a match would pass our post-filters
     let passes = |n: &str, h: &str| -> bool {
-        let Some(mut mi) = neo_frizbee::match_list_indices(n, &[h], &config)
+        let Some(mut mi) = neo_frizbee::Matcher::new(n, &config)
+            .match_list_indices(&[h])
             .into_iter()
             .next()
         else {
@@ -70,7 +71,7 @@ fn test_fuzzy_typo_scoring() {
             return false;
         }
         if let (Some(&first), Some(&last)) = (mi.indices.first(), mi.indices.last()) {
-            let span = last - first + 1;
+            let span = (last - first + 1) as usize;
             if span > max_match_span {
                 return false;
             }
@@ -146,10 +147,12 @@ fn test_multi_grep_search() {
         max_file_size: MAX_FFFILE_SIZE,
         max_matches_per_file: 0,
         smart_case: true,
+        casing: None,
         file_offset: 0,
         page_limit: 100,
         mode: super::GrepMode::PlainText,
         time_budget_ms: 0,
+        enforce_time_budget: false,
         before_context: 0,
         after_context: 0,
         classify_definitions: false,
@@ -418,10 +421,12 @@ fn test_grep_no_duplicates_with_overflow_trailing_bits() {
         max_file_size: MAX_FFFILE_SIZE,
         max_matches_per_file: 0,
         smart_case: true,
+        casing: None,
         file_offset: 0,
         page_limit: 100,
         mode: super::GrepMode::PlainText,
         time_budget_ms: 0,
+        enforce_time_budget: false,
         before_context: 0,
         after_context: 0,
         classify_definitions: false,
@@ -495,6 +500,7 @@ fn regex_fallback_keeps_file_path_scope_issue_756() {
     let options = crate::GrepSearchOptions {
         mode: super::GrepMode::Regex,
         smart_case: true,
+        casing: None,
         max_matches_per_file: 80,
         page_limit: 100,
         ..Default::default()

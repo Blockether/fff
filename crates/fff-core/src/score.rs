@@ -19,6 +19,14 @@ enum FileItems<'a> {
 
 impl<'a> FileItems<'a> {
     #[inline]
+    fn len(&self) -> usize {
+        match self {
+            FileItems::All(s) => s.len(),
+            FileItems::Filtered(v) => v.len(),
+        }
+    }
+
+    #[inline]
     fn index(&self, index: usize) -> &'a FileItem {
         match self {
             FileItems::All(s) => &s[index],
@@ -61,32 +69,17 @@ fn match_fuzzy_parts(
         return vec![];
     }
 
-    let resolve = |file: &FileItem,
-                   buf: &mut [*const u8; MAX_PATH_CHUNKS]|
-     -> Option<(usize, u16)> { resolve_file_chunks(file, arena, buf) };
-
-    // because we reassemble the vec of reference we have to use a different type
-    // to narrow down the [&FileItem] which would be resolved by frizbee as &&
-    let resolve_ref = |file: &&FileItem,
-                       buf: &mut [*const u8; MAX_PATH_CHUNKS]|
-     -> Option<(usize, u16)> { resolve_file_chunks(file, arena, buf) };
-
-    let first_part_matches = match working_files {
-        FileItems::All(files) => neo_frizbee::match_list_parallel_resolved(
-            valid_parts[0],
-            files,
-            &resolve,
-            options,
-            max_threads,
-        ),
-        FileItems::Filtered(files) => neo_frizbee::match_list_parallel_resolved(
-            valid_parts[0],
-            files.as_slice(),
-            &resolve_ref,
-            options,
-            max_threads,
-        ),
-    };
+    // Index-based resolver: no `Vec<&FileItem>` materialization for either the
+    // full list or the per-part subsets, and a single monomorphized hot loop.
+    let first_part_matches = neo_frizbee::match_range_parallel_resolved(
+        valid_parts[0],
+        working_files.len(),
+        &|index, buf: &mut [*const u8; MAX_PATH_CHUNKS]| {
+            resolve_file_chunks(working_files.index(index as usize), arena, buf)
+        },
+        options,
+        max_threads,
+    );
 
     if valid_parts.len() == 1 {
         return first_part_matches;
@@ -98,16 +91,16 @@ fn match_fuzzy_parts(
         let mut part_options = *options;
         part_options.max_typos = options.max_typos.map(|t| t.min(part.len() as u16));
 
-        // Collect the subset of files that survived the previous round.
-        let subset: Vec<&FileItem> = matches
-            .iter()
-            .map(|m| working_files.index(m.index as usize))
-            .collect();
-
-        let sub_matches = neo_frizbee::match_list_parallel_resolved(
+        // Match only the files that survived the previous round, addressed
+        // through the previous matches without collecting a subset.
+        let survivors = &matches;
+        let sub_matches = neo_frizbee::match_range_parallel_resolved(
             part,
-            subset.as_slice(),
-            &resolve_ref,
+            survivors.len(),
+            &|index, buf: &mut [*const u8; MAX_PATH_CHUNKS]| {
+                let file = working_files.index(survivors[index as usize].index as usize);
+                resolve_file_chunks(file, arena, buf)
+            },
             &part_options,
             max_threads,
         );
@@ -206,7 +199,7 @@ pub(crate) fn fuzzy_match_byte_offsets_for_page<'q>(
         .any(|part| part.chars().any(|ch| ch.is_uppercase()));
     let config = neo_frizbee::Config {
         max_typos: Some(max_typos),
-        sort: false,
+        sort: neo_frizbee::SortStrategy::Unsorted,
         scoring: Scoring {
             capitalization_bonus: if has_uppercase { 8 } else { 0 },
             matching_case_bonus: if has_uppercase { 4 } else { 0 },
@@ -215,6 +208,8 @@ pub(crate) fn fuzzy_match_byte_offsets_for_page<'q>(
         ..Default::default()
     };
 
+    // Match on `&str` so this shares frizbee's instantiation with fuzzy grep.
+    let path_strs: Vec<&str> = paths.iter().map(String::as_str).collect();
     for (idx, part) in parts.iter().copied().enumerate() {
         let mut part_config = config;
         if idx > 0 {
@@ -222,7 +217,7 @@ pub(crate) fn fuzzy_match_byte_offsets_for_page<'q>(
         }
 
         let mut matcher = neo_frizbee::Matcher::new(part, &part_config);
-        for mut matched in matcher.match_list_indices(&paths) {
+        for mut matched in matcher.match_list_indices(&path_strs) {
             let item_idx = matched.index as usize;
             let Some(path) = paths.get(item_idx) else {
                 continue;
@@ -240,7 +235,7 @@ pub(crate) fn fuzzy_match_byte_offsets_for_page<'q>(
     ranges_by_item
 }
 
-fn char_indices_to_byte_offsets(line: &str, char_indices: &[usize]) -> SmallVec<[(u32, u32); 4]> {
+fn char_indices_to_byte_offsets(line: &str, char_indices: &[u32]) -> SmallVec<[(u32, u32); 4]> {
     let char_byte_ranges: Vec<(usize, usize)> = line
         .char_indices()
         .map(|(byte_pos, ch)| (byte_pos, byte_pos + ch.len_utf8()))
@@ -248,7 +243,7 @@ fn char_indices_to_byte_offsets(line: &str, char_indices: &[usize]) -> SmallVec<
     let mut result: SmallVec<[(u32, u32); 4]> = SmallVec::with_capacity(char_indices.len());
 
     for &char_idx in char_indices {
-        let Some(&(start, end)) = char_byte_ranges.get(char_idx) else {
+        let Some(&(start, end)) = char_byte_ranges.get(char_idx as usize) else {
             continue;
         };
 
@@ -328,15 +323,12 @@ fn match_fuzzy_parts_dirs(
         return vec![];
     }
 
-    let resolve_chunks_for_frizbee =
-        |dir: &&DirItem, buf: &mut [*const u8; MAX_PATH_CHUNKS]| -> Option<(usize, u16)> {
-            resolve_dir_chunks(dir, arena, overflow_arena, buf)
-        };
-
-    let first_part_matches = neo_frizbee::match_list_parallel_resolved(
+    let first_part_matches = neo_frizbee::match_range_parallel_resolved(
         valid_parts[0],
-        working_dirs,
-        &resolve_chunks_for_frizbee,
+        working_dirs.len(),
+        &|index, buf: &mut [*const u8; MAX_PATH_CHUNKS]| {
+            resolve_dir_chunks(working_dirs[index as usize], arena, overflow_arena, buf)
+        },
         options,
         max_threads,
     );
@@ -351,16 +343,16 @@ fn match_fuzzy_parts_dirs(
         let mut part_options = *options;
         part_options.max_typos = options.max_typos.map(|t| t.min(part.len() as u16));
 
-        // Collect the subset of dirs that survived the previous round.
-        let subset: Vec<&DirItem> = matches
-            .iter()
-            .map(|m| working_dirs[m.index as usize])
-            .collect();
-
-        let sub_matches = neo_frizbee::match_list_parallel_resolved(
+        // Match only the dirs that survived the previous round, addressed
+        // through the previous matches without collecting a subset.
+        let survivors = &matches;
+        let sub_matches = neo_frizbee::match_range_parallel_resolved(
             part,
-            subset.as_slice(),
-            &resolve_chunks_for_frizbee,
+            survivors.len(),
+            &|index, buf: &mut [*const u8; MAX_PATH_CHUNKS]| {
+                let dir = working_dirs[survivors[index as usize].index as usize];
+                resolve_dir_chunks(dir, arena, overflow_arena, buf)
+            },
             &part_options,
             max_threads,
         );
@@ -441,7 +433,7 @@ pub(crate) fn fuzzy_match_and_score_dirs<'a>(
 
     let options = neo_frizbee::Config {
         max_typos: Some(context.max_typos),
-        sort: false,
+        sort: neo_frizbee::SortStrategy::Unsorted,
         scoring: Scoring {
             capitalization_bonus: if has_uppercase { 8 } else { 0 },
             matching_case_bonus: if has_uppercase { 4 } else { 0 },
@@ -516,6 +508,7 @@ pub(crate) fn fuzzy_match_and_score_dirs<'a>(
                 special_filename_bonus: 0,
                 frecency_boost,
                 git_status_boost: 0,
+                git_recency_boost: 0,
                 distance_penalty,
                 current_file_penalty: 0,
                 combo_match_boost: 0,
@@ -644,7 +637,7 @@ fn match_and_score_in_arena<'a>(
 
     let options = neo_frizbee::Config {
         max_typos: Some(context.max_typos),
-        sort: false,
+        sort: neo_frizbee::SortStrategy::Unsorted,
         scoring: Scoring {
             capitalization_bonus: if has_uppercase { 8 } else { 0 },
             matching_case_bonus: if has_uppercase { 4 } else { 0 },
@@ -685,16 +678,18 @@ fn match_and_score_in_arena<'a>(
         if fallback_filenames.is_empty() {
             vec![]
         } else {
-            let mut matches = neo_frizbee::match_list_parallel(
-                fuzzy_parts[0],
-                &fallback_filenames,
-                &options,
-                if path_matches.len() > 4096 {
-                    context.max_threads.div_ceil(2048)
-                } else {
-                    1
-                },
-            );
+            // Match on `&str` so frizbee reuses the instantiation its index
+            // resolver already emits instead of a separate `Cow<str>` copy.
+            let filename_strs: Vec<&str> = fallback_filenames.iter().map(Cow::as_ref).collect();
+            let mut matches = neo_frizbee::Matcher::new(fuzzy_parts[0], &options)
+                .match_list_parallel(
+                    &filename_strs,
+                    if path_matches.len() > 4096 {
+                        context.max_threads.div_ceil(2048)
+                    } else {
+                        1
+                    },
+                );
 
             sort_by_key_with_buffer(&mut matches, |m| fallback_indices[m.index as usize]);
             matches
@@ -721,6 +716,7 @@ fn match_and_score_in_arena<'a>(
             } else {
                 0
             };
+            let git_recency_boost = file.git_recency_score as i32;
 
             if context.current_file.is_some() || context.last_same_query_match.is_some() {
                 file.write_dir_str(arena, &mut dir_buf);
@@ -847,6 +843,7 @@ fn match_and_score_in_arena<'a>(
             let total = base_score
                 .saturating_add(frecency_boost)
                 .saturating_add(git_status_boost)
+                .saturating_add(git_recency_boost)
                 .saturating_add(distance_penalty)
                 .saturating_add(filename_bonus)
                 .saturating_add(current_file_penalty)
@@ -865,6 +862,7 @@ fn match_and_score_in_arena<'a>(
                 },
                 frecency_boost,
                 git_status_boost,
+                git_recency_boost,
                 distance_penalty,
                 combo_match_boost,
                 path_alignment_bonus,
@@ -925,11 +923,13 @@ fn score_filtered_by_frecency<'a>(
         } else {
             0
         };
+        let git_recency_boost = file.git_recency_score as i32;
 
         let current_file_penalty =
             calculate_current_file_penalty(file, total_frecency_score, context, arena);
         let total = total_frecency_score
             .saturating_add(git_status_boost)
+            .saturating_add(git_recency_boost)
             .saturating_add(current_file_penalty);
 
         let score = Score {
@@ -943,6 +943,7 @@ fn score_filtered_by_frecency<'a>(
             current_file_penalty,
             frecency_boost: total_frecency_score,
             git_status_boost,
+            git_recency_boost,
             exact_match: false,
             match_type: "frecency",
         };
@@ -1090,6 +1091,7 @@ mod tests {
                     current_file_penalty: 0,
                     frecency_boost: 0,
                     git_status_boost: 0,
+                    git_recency_boost: 0,
                     exact_match: false,
                     match_type: "test",
                     combo_match_boost: 0,
@@ -1488,21 +1490,21 @@ mod filename_bonus_tests {
 
         let options = neo_frizbee::Config {
             max_typos: Some(2),
-            sort: false,
+            sort: neo_frizbee::SortStrategy::Unsorted,
             ..Default::default()
         };
 
-        let matches = neo_frizbee::match_list("aipart", &[path], &options);
+        let matches = neo_frizbee::Matcher::new("aipart", &options).match_list(&[path]);
         assert!(!matches.is_empty(), "'aipart' should match the path");
 
-        let matches = neo_frizbee::match_list("core", &[path], &options);
+        let matches = neo_frizbee::Matcher::new("core", &options).match_list(&[path]);
         assert!(!matches.is_empty(), "'core' should match the path");
 
         let co_options = neo_frizbee::Config {
             max_typos: Some(2),
             ..options
         };
-        let matches = neo_frizbee::match_list("co", &[path], &co_options);
+        let matches = neo_frizbee::Matcher::new("co", &co_options).match_list(&[path]);
         assert!(!matches.is_empty(), "'co' should match the path");
     }
 
@@ -1512,18 +1514,103 @@ mod filename_bonus_tests {
 
         let options = neo_frizbee::Config {
             max_typos: Some(2),
-            sort: false,
+            sort: neo_frizbee::SortStrategy::Unsorted,
             ..Default::default()
         };
 
-        let matches = neo_frizbee::match_list("co", &[path.as_str()], &options);
+        let matches = neo_frizbee::Matcher::new("co", &options).match_list(&[path.as_str()]);
         assert!(!matches.is_empty(), "'co' should match the lowercase path");
 
-        let matches = neo_frizbee::match_list("core", &[path.as_str()], &options);
+        let matches = neo_frizbee::Matcher::new("core", &options).match_list(&[path.as_str()]);
         assert!(
             !matches.is_empty(),
             "'core' should match the lowercase path"
         );
+    }
+}
+
+#[cfg(test)]
+mod git_recency_scoring_tests {
+    use super::*;
+    use crate::types::PaginationArgs;
+    use fff_query_parser::QueryParser;
+
+    fn make_files(specs: &[(&str, i16)]) -> (Vec<FileItem>, ArenaPtr) {
+        let path_strings: Vec<String> = specs.iter().map(|(p, _)| p.to_string()).collect();
+        let items: Vec<FileItem> = specs
+            .iter()
+            .map(|(p, _)| {
+                let fname = p.rfind(std::path::is_separator).map(|i| i + 1).unwrap_or(0) as u16;
+                FileItem::new_raw(fname, 0, 0, None, false)
+            })
+            .collect();
+        let (store, strings) =
+            crate::simd_path::build_chunked_path_store_from_strings(&path_strings, &items);
+        let arena = store.as_arena_ptr();
+        let mut result: Vec<FileItem> = items;
+        for (i, file) in result.iter_mut().enumerate() {
+            file.set_path(strings[i].clone());
+            file.git_recency_score = specs[i].1;
+        }
+        std::mem::forget(store);
+        (result, arena)
+    }
+
+    fn search(files: &[FileItem], query: &str, arena: ArenaPtr) -> Vec<(String, Score)> {
+        let parser = QueryParser::default();
+        let parsed = parser.parse(query);
+        let ctx = ScoringContext {
+            query: &parsed,
+            max_threads: 1,
+            max_typos: 2,
+            current_file: None,
+            last_same_query_match: None,
+            project_path: None,
+            combo_boost_score_multiplier: 100,
+            min_combo_count: 3,
+            pagination: PaginationArgs {
+                offset: 0,
+                limit: 100,
+            },
+        };
+        let (items, scores, _) =
+            fuzzy_match_and_score_files(files, &ctx, files.len(), arena, arena);
+        items
+            .iter()
+            .zip(scores)
+            .map(|(f, s)| (f.relative_path(arena), s))
+            .collect()
+    }
+
+    #[test]
+    fn recency_boost_breaks_ties_between_equal_fuzzy_matches() {
+        // Dir names share no letters with the query so both paths fuzzy-match
+        // identically and only the recency boost separates them.
+        let (files, arena) = make_files(&[("src/xxx/handler.rs", 0), ("src/yyy/handler.rs", 5)]);
+
+        let results = search(&files, "handler", arena);
+
+        assert!(results.len() >= 2);
+        assert_eq!(results[0].0, "src/yyy/handler.rs");
+        assert_eq!(results[0].1.git_recency_boost, 5);
+        assert_eq!(results[1].1.git_recency_boost, 0);
+        assert_eq!(
+            results[0].1.total - results[1].1.total,
+            5,
+            "boost is additive: exactly +1 point per participating commit"
+        );
+    }
+
+    #[test]
+    fn recency_boost_ranks_files_in_frecency_only_mode() {
+        let (files, arena) = make_files(&[("cold.rs", 0), ("committed.rs", 7)]);
+
+        let results = search(&files, "", arena);
+
+        assert_eq!(results[0].0, "committed.rs");
+        assert_eq!(results[0].1.git_recency_boost, 7);
+        assert_eq!(results[0].1.total, 7);
+        assert_eq!(results[0].1.match_type, "frecency");
     }
 }
 

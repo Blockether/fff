@@ -23,6 +23,19 @@ use server::FffServer;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+// Runs at load time, before mimalloc maps its first arena.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android"),
+    unsafe(link_section = ".init_array")
+)]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,__mod_init_func")
+)]
+#[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
+static TUNE_MIMALLOC: extern "C" fn() = fff::tune_mimalloc;
+
 pub const MCP_INSTRUCTIONS: &str = concat!(
     "FFF is a fast file finder with frecency-ranked results (frequent/recent files first, git-dirty files boosted).\n",
     "\n",
@@ -154,7 +167,8 @@ pub(crate) struct Args {
 
     /// Maximum number of files whose content is kept persistently in memory.
     /// Files beyond this limit are still searchable via temporary mmaps that
-    /// are released after each grep. Defaults to 30 000.
+    /// are released after each grep. `0` disables persistent caching entirely.
+    /// Unset: auto-sized from the scanned file count.
     /// Also settable via the FFF_MAX_CACHED_FILES environment variable.
     #[arg(long = "max-cached-files", env = "FFF_MAX_CACHED_FILES")]
     max_cached_files: Option<usize>,
@@ -347,10 +361,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: FFFMode::Ai,
             cache_budget: args
                 .max_cached_files
-                .map(fff::ContentCacheBudget::new_for_repo),
+                .map(fff::ContentCacheBudget::with_max_files),
             follow_symlinks: args.follow_symlinks,
+            respect_ignore_files: true,
+            ignore_overlay: Default::default(),
             enable_home_dir_scanning: args.enable_home_scan,
             enable_fs_root_scanning: args.enable_root_scan,
+            git_recency: Default::default(),
         },
     )
     .map_err(|e| format!("Failed to init file picker: {}", e))?;

@@ -139,7 +139,7 @@ const ffiDefinition = {
   },
 
   // Live grep (content search)
-  fff_live_grep: {
+  fff_live_grep_ex: {
     args: [
       FFIType.ptr, // handle
       FFIType.cstring, // query
@@ -150,6 +150,7 @@ const ffiDefinition = {
       FFIType.u32, // file_offset
       FFIType.u32, // page_limit
       FFIType.u64, // time_budget_ms
+      FFIType.bool, // enforce_time_budget
       FFIType.u32, // before_context
       FFIType.u32, // after_context
       FFIType.bool, // classify_definitions
@@ -158,7 +159,7 @@ const ffiDefinition = {
   },
 
   // Multi-pattern grep (Aho-Corasick)
-  fff_multi_grep: {
+  fff_multi_grep_ex: {
     args: [
       FFIType.ptr, // handle
       FFIType.cstring, // patterns_joined (\n-separated)
@@ -169,6 +170,7 @@ const ffiDefinition = {
       FFIType.u32, // file_offset
       FFIType.u32, // page_limit
       FFIType.u64, // time_budget_ms
+      FFIType.bool, // enforce_time_budget
       FFIType.u32, // before_context
       FFIType.u32, // after_context
       FFIType.bool, // classify_definitions
@@ -238,6 +240,10 @@ const ffiDefinition = {
   fff_watch_events_get_kind: {
     args: [FFIType.ptr, FFIType.u32],
     returns: FFIType.u8,
+  },
+  fff_watch_events_get_from_path: {
+    args: [FFIType.ptr, FFIType.u32],
+    returns: FFIType.ptr,
   },
 
   // Git
@@ -1244,12 +1250,13 @@ export function ffiLiveGrep(
   fileOffset: number,
   pageLimit: number,
   timeBudgetMs: number,
+  enforceTimeBudget: boolean,
   beforeContext: number,
   afterContext: number,
   classifyDefinitions: boolean,
 ): Result<GrepResult> {
   const library = loadLibrary();
-  const resultPtr = library.symbols.fff_live_grep(
+  const resultPtr = library.symbols.fff_live_grep_ex(
     handle,
     ptr(encodeString(query)),
     grepModeToU8(mode),
@@ -1259,6 +1266,7 @@ export function ffiLiveGrep(
     fileOffset,
     pageLimit,
     BigInt(timeBudgetMs),
+    enforceTimeBudget,
     beforeContext,
     afterContext,
     classifyDefinitions,
@@ -1279,12 +1287,13 @@ export function ffiMultiGrep(
   fileOffset: number,
   pageLimit: number,
   timeBudgetMs: number,
+  enforceTimeBudget: boolean,
   beforeContext: number,
   afterContext: number,
   classifyDefinitions: boolean,
 ): Result<GrepResult> {
   const library = loadLibrary();
-  const resultPtr = library.symbols.fff_multi_grep(
+  const resultPtr = library.symbols.fff_multi_grep_ex(
     handle,
     ptr(encodeString(patternsJoined)),
     ptr(encodeString(constraints)),
@@ -1294,6 +1303,7 @@ export function ffiMultiGrep(
     fileOffset,
     pageLimit,
     BigInt(timeBudgetMs),
+    enforceTimeBudget,
     beforeContext,
     afterContext,
     classifyDefinitions,
@@ -1392,6 +1402,7 @@ const WATCH_EVENT_KINDS: readonly WatchEventKind[] = [
   "modified",
   "removed",
   "rescan",
+  "renamed",
 ];
 
 /**
@@ -1412,10 +1423,16 @@ export function readWatchEventBatch(batchPtr: Pointer | number | null): WatchEve
   for (let i = 0; i < count; i++) {
     const path = symbols.fff_watch_events_get_path(bp, i) as Pointer | null;
     const kind = symbols.fff_watch_events_get_kind(bp, i) as number;
-    events.push({
+    const event: WatchEvent = {
       path: readCString(path) ?? "",
       kind: WATCH_EVENT_KINDS[kind] ?? "rescan",
-    });
+    };
+    if (event.kind === "renamed") {
+      const from = symbols.fff_watch_events_get_from_path(bp, i) as Pointer | null;
+      const decoded = readCString(from);
+      if (decoded) event.from = decoded;
+    }
+    events.push(event);
   }
 
   symbols.fff_free_watch_events(bp);

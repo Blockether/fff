@@ -1,5 +1,5 @@
 *fff.nvim.txt*
-                           For Neovim >= 0.10.0    Last change: 2026 August 25
+                        For Neovim >= 0.10.0    Last change: 2026 September 21
 
 ==============================================================================
 Table of Contents                                 *fff.nvim-table-of-contents*
@@ -62,7 +62,7 @@ VIM.PACK
 >lua
     -- Package name changed from `fff.nvim` to `fff`. If you installed fff.nvim before, clean with `:packdel fff.nvim`
     vim.pack.add({ 'https://github.com/dmtrKovalenko/fff' })
-    
+
     vim.api.nvim_create_autocmd('PackChanged', {
       callback = function(ev)
         local name, kind = ev.data.spec.name, ev.data.kind
@@ -72,12 +72,12 @@ VIM.PACK
         end
       end,
     })
-    
+
     vim.g.fff = {
       lazy_sync = true,
       debug = { enabled = true, show_scores = true },
     }
-    
+
     vim.keymap.set('n', 'ff', function() require('fff').find_files() end, { desc = 'FFFind files' })
 <
 
@@ -92,7 +92,7 @@ PUBLIC API ~
     require('fff').refresh_git_status()                -- refresh git status
     require('fff').find_files_in_dir(path)             -- find in a specific dir
     require('fff').change_indexing_directory(new_path) -- change root
-    
+
     -- Programmatic search (no UI). Useful for plugin integrations.
     require('fff').file_search(query, opts)            -- fuzzy search files / dirs / mixed
     require('fff').content_search(query, opts)         -- programmatic grep
@@ -135,9 +135,11 @@ Each match item has `relative_path`, `name`, `line_number`, `col`,
       max_file_size         = 10 * 1024 * 1024,
       max_matches_per_file  = 100,
       smart_case            = true,
+      casing             = nil,      -- 'smart' | 'sensitive' | 'insensitive'; overrides smart_case
       page_size             = 50,
       file_offset           = 0,
       time_budget_ms        = 0,
+      enforce_time_budget   = false,    -- also bound zero-match searches
       trim_whitespace       = false,
       cwd                   = nil,      -- switch indexed root if different
       wait_for_index_ms     = nil,      -- override the default scan wait timeout
@@ -220,7 +222,7 @@ Defaults are sensible. Override only what you care about.
         --   { ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' },
         --   { ' ', ' ', ' ', ' ', ' ' },
         -- },
-    
+
         flex = { size = 130, wrap = 'top' },
         min_list_height = 10, --  do not display anything except the list below this threshold
         show_scrollbar = true,
@@ -290,6 +292,12 @@ Defaults are sensible. Override only what you care about.
       },
       git = {
         status_text_color = false, -- true to color filenames by git status
+        -- files that participated in the last N configured commits will get scoring bonus
+        recency = {
+          enabled = true, -- boost files from recent commits of the current branch
+          max_commits = 10, -- analyze the last N branch-specific commits
+          max_files_per_commit = 50, -- skip bulk commits touching more files than this
+        },
       },
       select = {
         -- Return winid to open the chosen file in, or nil to open in the original window
@@ -299,11 +307,17 @@ Defaults are sensible. Override only what you care about.
         max_file_size = 10 * 1024 * 1024,
         max_matches_per_file = 100,
         smart_case = true,
+        casing = nil, -- 'smart' | 'sensitive' | 'insensitive'; overrides smart_case when set
         time_budget_ms = 150,
+        enforce_time_budget = false, -- apply time_budget_ms even before anything matched (off = zero-match queries scan everything)
         modes = { 'plain', 'regex', 'fuzzy' },
         trim_whitespace = false,
         enable_filename_constraint = false, -- treat filename-like tokens (e.g. `score.rs`) in a grep query as a file-path filter scoping the search; off = searched as literal text
         location_format = ':%d:%d', -- printf format for line:col prefix in grep results, e.g. ':%d' for line-only
+      },
+      suggestions = {
+        enabled = true, -- when a query has no results, look them up in the other mode (files <-> grep) and show as a hint
+        grep_time_budget_ms = 50, -- hard cap for the grep hint in file mode; it is skipped until content indexing finishes
       },
       debug = {
         enabled = false, -- show the file info panel next to the preview
@@ -412,7 +426,7 @@ back to the default built from `hl.normal`, `hl.border`, and `hl.title`.
 >lua
     -- Apply the same winhighlight to all picker windows
     hl = { winhl = 'Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:Title' }
-    
+
     -- Or override specific windows only
     hl = {
       winhl = {
@@ -483,6 +497,7 @@ TROUBLESHOOTING ~
 - `:FFFOpenLog` opens the current session’s log file.
 - Historical log files are stored near the main log file `<state>/log/fff+<UTC-timestamp>+<pid>.log` (up to 20 files)
 - For a crash backtrace, run `lldb -- nvim` or `gdb -- nvim` and reproduce
+- fff keeps its allocator off transparent huge pages to keep the index RSS low (~15-20% on large repos); set `MIMALLOC_ALLOW_LARGE_OS_PAGES=2` before starting Neovim to trade that memory back for a slightly faster initial index build
 
 Generated by panvimdoc <https://github.com/kdheepak/panvimdoc>
 
