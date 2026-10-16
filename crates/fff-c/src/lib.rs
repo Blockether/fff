@@ -579,6 +579,38 @@ pub unsafe extern "C" fn fff_list_directory(
     respect_ignore_files: bool,
     follow_symlinks: bool,
 ) -> *mut FffResult {
+    unsafe {
+        fff_list_directory_with(
+            path,
+            max_depth,
+            include_hidden,
+            respect_ignore_files,
+            follow_symlinks,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    }
+}
+
+/// List one directory with caller ignore rules and no index.
+///
+/// Overlay strings contain newline-separated patterns. Exclusions take precedence.
+/// The depth bound applies to re-included trees too.
+///
+/// ## Safety
+/// `path` must be valid UTF-8. Overlay pointers must be valid UTF-8 or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_list_directory_with(
+    path: *const c_char,
+    max_depth: u32,
+    include_hidden: bool,
+    respect_ignore_files: bool,
+    follow_symlinks: bool,
+    custom_ignore_filenames: *const c_char,
+    exclude_globs: *const c_char,
+    unignore_globs: *const c_char,
+) -> *mut FffResult {
     let Some(path_str) = (unsafe { cstr_to_str(path) }) else {
         return FffResult::err("Path is null or invalid UTF-8");
     };
@@ -590,7 +622,12 @@ pub unsafe extern "C" fn fff_list_directory(
         follow_symlinks,
     };
 
-    match fff::list_directory(std::path::Path::new(path_str), &options) {
+    let overlay = fff::ignore::IgnoreOverlay {
+        custom_ignore_filenames: unsafe { lines_of(custom_ignore_filenames) },
+        exclude_globs: unsafe { lines_of(exclude_globs) },
+        unignore_globs: unsafe { lines_of(unignore_globs) },
+    };
+    match fff::list::list_directory_with(std::path::Path::new(path_str), &options, &overlay) {
         Ok(entries) => FffResult::ok_handle(FffListResult::from_entries(&entries) as *mut c_void),
         Err(error) => FffResult::err(&error.to_string()),
     }

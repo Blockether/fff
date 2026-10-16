@@ -56,14 +56,44 @@ pub struct ListEntry {
 /// Entries are sorted by their relative path. Symlinked directories are listed
 /// (`is_dir` follows the link's TARGET) but only descended when
 /// [`ListOptions::follow_symlinks`] is set.
-pub fn list_directory(path: &Path, options: &ListOptions) -> crate::Result<Vec<ListEntry>> {
+pub fn list_directory_with(
+    path: &Path,
+    options: &ListOptions,
+    overlay: &crate::ignore::IgnoreOverlay,
+) -> crate::Result<Vec<ListEntry>> {
     let metadata =
         std::fs::metadata(path).map_err(|_| crate::Error::InvalidPath(path.to_path_buf()))?;
     if !metadata.is_dir() {
         return Err(crate::Error::InvalidPath(path.to_path_buf()));
     }
+    let compiled = overlay.compile(path);
+    let mut entries = collect_listing(path, options, &compiled, None);
+    #[cfg(feature = "ripgrep")]
+    if options.respect_ignore_files && !compiled.unignore_roots().is_empty() {
+        entries.extend(collect_listing(
+            path,
+            options,
+            &compiled,
+            Some(compiled.unignore_roots()),
+        ));
+    }
+    entries.sort_unstable_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    entries.dedup_by(|left, right| left.relative_path == right.relative_path);
+    Ok(entries)
+}
 
-    let respect = options.respect_ignore_files;
+/// List one directory without a caller ignore overlay.
+pub fn list_directory(path: &Path, options: &ListOptions) -> crate::Result<Vec<ListEntry>> {
+    list_directory_with(path, options, &crate::ignore::IgnoreOverlay::default())
+}
+
+fn collect_listing(
+    path: &Path,
+    options: &ListOptions,
+    overlay: &crate::ignore::CompiledIgnoreOverlay,
+    unignore_roots: Option<&[std::path::PathBuf]>,
+) -> Vec<ListEntry> {
+    let respect = options.respect_ignore_files && unignore_roots.is_none();
     let mut builder = WalkBuilder::new(path);
     builder
         .max_depth(Some(options.max_depth.max(1)))
@@ -74,13 +104,14 @@ pub fn list_directory(path: &Path, options: &ListOptions) -> crate::Result<Vec<L
         .git_global(respect)
         .ignore(respect)
         .follow_links(options.follow_symlinks);
-
-    let root = path.to_path_buf();
+    if respect {
+        for name in &overlay.source().custom_ignore_filenames {
+            builder.add_custom_ignore_filename(name);
+        }
+    }
     let collected = parking_lot::Mutex::new(Vec::<ListEntry>::new());
     builder.build_parallel().run(|| {
-        let root = root.clone();
         let collected = &collected;
-
         Box::new(move |result| {
             let Ok(entry) = result else {
                 return WalkState::Continue;
@@ -89,19 +120,38 @@ pub fn list_directory(path: &Path, options: &ListOptions) -> crate::Result<Vec<L
             if depth == 0 {
                 return WalkState::Continue;
             }
-            let Ok(relative) = entry.path().strip_prefix(&root) else {
+            let Ok(relative) = entry.path().strip_prefix(path) else {
                 return WalkState::Continue;
             };
-
             let file_type = entry.file_type();
-            // A symlink is listed as what it POINTS AT, so a linked directory
-            // reads as a directory without the walker ever descending it.
+            // List symlinks by their target type without following them.
             let is_dir = file_type.is_some_and(|ft| ft.is_dir())
                 || (file_type.is_some_and(|ft| ft.is_symlink())
                     && std::fs::metadata(entry.path()).is_ok_and(|md| md.is_dir()));
+            if overlay.is_excluded(entry.path(), is_dir) {
+                return if is_dir {
+                    WalkState::Skip
+                } else {
+                    WalkState::Continue
+                };
+            }
+            if let Some(roots) = unignore_roots {
+                let related = roots
+                    .iter()
+                    .any(|root| entry.path().starts_with(root) || root.starts_with(entry.path()));
+                if !related {
+                    return if is_dir {
+                        WalkState::Skip
+                    } else {
+                        WalkState::Continue
+                    };
+                }
+                if !is_dir && !overlay.is_unignored(entry.path(), false) {
+                    return WalkState::Continue;
+                }
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
             let metadata = entry.metadata().ok();
-
             collected.lock().push(ListEntry {
                 relative_path: crate::path_utils::to_canonical_slashes(&relative.to_string_lossy())
                     .into_owned(),
@@ -119,9 +169,7 @@ pub fn list_directory(path: &Path, options: &ListOptions) -> crate::Result<Vec<L
                     .map_or(0, |since| since.as_secs()),
                 name: name.clone(),
             });
-
-            // Cache trees are listed but never opened: nobody wants the 52k
-            // blobs under `.git/` or `.cache/` counted one by one.
+            // List cache trees, but never open them.
             if is_dir && is_cache_dir_name(&name) {
                 WalkState::Skip
             } else {
@@ -129,10 +177,7 @@ pub fn list_directory(path: &Path, options: &ListOptions) -> crate::Result<Vec<L
             }
         })
     });
-
-    let mut entries = collected.into_inner();
-    entries.sort_unstable_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    Ok(entries)
+    collected.into_inner()
 }
 
 #[cfg(test)]
@@ -142,6 +187,94 @@ mod tests {
 
     fn names(entries: &[ListEntry]) -> Vec<&str> {
         entries.iter().map(|e| e.relative_path.as_str()).collect()
+    }
+
+    #[cfg(feature = "ripgrep")]
+    #[test]
+    fn overlay_listing_is_bounded_and_preserves_ignore_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("vendor/keep/deep")).unwrap();
+        fs::write(root.join(".ignore"), "vendor/\n").unwrap();
+        fs::write(root.join(".rgignore"), "hidden.txt\n").unwrap();
+        for name in [
+            "visible.txt",
+            "hidden.txt",
+            "secret.txt",
+            "vendor/keep/a.txt",
+            "vendor/keep/secret.txt",
+            "vendor/keep/deep/too-deep.txt",
+        ] {
+            fs::write(root.join(name), "x").unwrap();
+        }
+        let overlay = crate::ignore::IgnoreOverlay {
+            custom_ignore_filenames: vec![".rgignore".into()],
+            exclude_globs: vec!["secret.txt".into()],
+            unignore_globs: vec!["vendor/keep/**".into()],
+        };
+        let options = ListOptions {
+            max_depth: 3,
+            ..ListOptions::default()
+        };
+        let entries = list_directory_with(root, &options, &overlay).unwrap();
+        assert_eq!(
+            names(&entries),
+            [
+                "vendor",
+                "vendor/keep",
+                "vendor/keep/a.txt",
+                "vendor/keep/deep",
+                "visible.txt"
+            ]
+        );
+        assert!(entries.iter().all(|entry| entry.depth <= 3));
+        let shallow = list_directory_with(root, &ListOptions::default(), &overlay).unwrap();
+        assert_eq!(names(&shallow), ["vendor", "visible.txt"]);
+    }
+
+    #[cfg(feature = "ripgrep")]
+    #[test]
+    fn overlays_keep_hidden_symlink_and_cache_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("vendor/.git/objects")).unwrap();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        fs::write(root.join(".ignore"), "vendor/\n").unwrap();
+        fs::write(root.join(".rgignore"), "outside/\n").unwrap();
+        for name in [
+            "vendor/a.txt",
+            "vendor/.hidden",
+            "vendor/.git/objects/blob",
+            "vendor/secret.txt",
+            "outside/a.txt",
+        ] {
+            fs::write(root.join(name), "x").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("outside"), root.join("vendor/link")).unwrap();
+        let overlay = crate::ignore::IgnoreOverlay {
+            custom_ignore_filenames: vec![".rgignore".into()],
+            exclude_globs: vec!["secret.txt".into()],
+            unignore_globs: vec!["vendor/**".into()],
+        };
+        let options = ListOptions {
+            max_depth: 5,
+            ..ListOptions::default()
+        };
+        let entries = list_directory_with(root, &options, &overlay).unwrap();
+        assert!(names(&entries).contains(&"vendor/a.txt"));
+        assert!(!names(&entries).iter().any(|p| p.contains(".hidden")
+            || p.contains("objects")
+            || p.contains("secret")
+            || p.contains("link/")
+            || p.starts_with("outside")));
+        let options = ListOptions {
+            respect_ignore_files: false,
+            ..options
+        };
+        let entries = list_directory_with(root, &options, &overlay).unwrap();
+        assert!(names(&entries).contains(&"outside/a.txt"));
+        assert!(!names(&entries).contains(&"vendor/secret.txt"));
     }
 
     #[test]

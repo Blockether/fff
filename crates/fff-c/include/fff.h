@@ -701,6 +701,24 @@ struct FffResult *fff_list_directory(const char *path,
                                      bool follow_symlinks);
 
 /**
+ * List one directory with caller ignore rules and no index.
+ *
+ * Overlay strings contain newline-separated patterns. Exclusions take precedence.
+ * The depth bound applies to re-included trees too.
+ *
+ * ## Safety
+ * `path` must be valid UTF-8. Overlay pointers must be valid UTF-8 or NULL.
+ */
+struct FffResult *fff_list_directory_with(const char *path,
+                                          uint32_t max_depth,
+                                          bool include_hidden,
+                                          bool respect_ignore_files,
+                                          bool follow_symlinks,
+                                          const char *custom_ignore_filenames,
+                                          const char *exclude_globs,
+                                          const char *unignore_globs);
+
+/**
  * Perform a mixed fuzzy search across both files and directories.
  *
  * Returns one flat list interleaved by descending total score; each item's

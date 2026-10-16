@@ -137,7 +137,7 @@ pub mod path_utils;
 /// Stateless, bounded-depth, ignore-aware listing of ONE directory —
 /// including a filesystem root or a home directory, which indexing refuses.
 pub mod list;
-pub use list::{ListEntry, ListOptions, list_directory};
+pub use list::{ListEntry, ListOptions, list_directory, list_directory_with};
 
 /// Core data types shared across the crate.
 pub mod types;
