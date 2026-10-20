@@ -7,10 +7,12 @@ use crate::shared::{SharedFilePicker, SharedFrecency};
 use crate::sort_buffer::sort_with_buffer;
 use crate::watch::{RawWatchEvent, WatchEventKind};
 use git2::Repository;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 use notify::{Config, EventKind, EventKindMask, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, NoCache, new_debouncer_opt};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -978,6 +980,8 @@ struct IgnoreFilter<'a> {
     /// The SAME caller overlay the walk used: without it the watcher would
     /// re-admit `exclude_globs` files and re-drop `unignore_globs` ones.
     overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
+    /// Set only when libgit2 answers and an ancestor of the base is ignored.
+    ignored_ancestor_base: Option<IgnoredAncestorBase>,
 }
 
 impl<'a> IgnoreFilter<'a> {
@@ -988,12 +992,17 @@ impl<'a> IgnoreFilter<'a> {
         respect_ignore_files: bool,
         overlay: Arc<crate::ignore::CompiledIgnoreOverlay>,
     ) -> Self {
+        let ignored_ancestor_base = match (rules.is_none() && respect_ignore_files, repo) {
+            (true, Some(repo)) => IgnoredAncestorBase::detect(base_path, repo, &overlay),
+            _ => None,
+        };
         Self {
             base_path,
             rules,
             repo,
             respect_ignore_files,
             overlay,
+            ignored_ancestor_base,
         }
     }
 
@@ -1029,7 +1038,13 @@ impl<'a> IgnoreFilter<'a> {
             return rules.is_ignored(relative);
         }
         match self.repo {
-            Some(repo) => repo.is_path_ignored(path) == Ok(true),
+            Some(repo) => {
+                repo.is_path_ignored(path) == Ok(true)
+                    && self
+                        .ignored_ancestor_base
+                        .as_ref()
+                        .is_none_or(|base| base.is_ignored(self.base_path, path))
+            }
             // No repo and no rules: the non-code-dir heuristic, applied to the
             // base-relative path so ancestors of the base (e.g. a temp dir
             // under AppData/Local on Windows) never match.
@@ -1038,6 +1053,131 @@ impl<'a> IgnoreFilter<'a> {
             ),
         }
     }
+}
+
+/// Ignore files of one directory, in the walk's precedence order: custom
+/// names, `.ignore`, then `.gitignore`.
+type DirIgnoreFiles = [Option<Gitignore>; 3];
+
+/// The walk starts at the base and never tests the directories above it, but
+/// libgit2 tests every ancestor. When an ancestor of the base is ignored,
+/// libgit2 calls every event path ignored; this repeats the walk's own
+/// decision for the components below the base.
+struct IgnoredAncestorBase {
+    workdir: PathBuf,
+    custom_names: Vec<String>,
+    /// `info/exclude`, then the global excludes: below every ignore file.
+    excludes: [Gitignore; 2],
+    dirs: Mutex<HashMap<PathBuf, Arc<DirIgnoreFiles>>>,
+}
+
+impl IgnoredAncestorBase {
+    fn detect(
+        base_path: &Path,
+        repo: &Repository,
+        overlay: &crate::ignore::CompiledIgnoreOverlay,
+    ) -> Option<Self> {
+        let workdir = crate::path_utils::normalize(repo.workdir()?.to_path_buf());
+        if base_path == workdir || !base_path.starts_with(&workdir) {
+            return None;
+        }
+        // The trailing separator makes libgit2 match `dir/` rules on the base too.
+        let mut base_dir = base_path.as_os_str().to_owned();
+        base_dir.push(std::path::MAIN_SEPARATOR_STR);
+        if repo.is_path_ignored(Path::new(&base_dir)) != Ok(true) {
+            return None;
+        }
+        let mut exclude = GitignoreBuilder::new(&workdir);
+        exclude.add(repo.path().join("info/exclude"));
+        Some(Self {
+            excludes: [
+                exclude.build().unwrap_or_else(|_| Gitignore::empty()),
+                Gitignore::global().0,
+            ],
+            workdir,
+            custom_names: overlay.source().custom_ignore_filenames.clone(),
+            dirs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn is_ignored(&self, base_path: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(base_path) else {
+            return false;
+        };
+        let mut chain: Vec<_> = base_path
+            .ancestors()
+            .take_while(|dir| dir.starts_with(&self.workdir))
+            .map(|dir| self.dir_files(dir))
+            .collect();
+        chain.reverse();
+
+        let mut current = base_path.to_path_buf();
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
+            current.push(component);
+            let is_last = components.peek().is_none();
+            if Self::matches(
+                &chain,
+                &self.excludes,
+                &current,
+                !is_last || current.is_dir(),
+            ) {
+                return true;
+            }
+            if !is_last {
+                chain.push(self.dir_files(&current));
+            }
+        }
+        false
+    }
+
+    fn matches(
+        chain: &[Arc<DirIgnoreFiles>],
+        excludes: &[Gitignore],
+        path: &Path,
+        is_dir: bool,
+    ) -> bool {
+        let layered = (0..3).flat_map(|kind| {
+            chain
+                .iter()
+                .rev()
+                .filter_map(move |files| files[kind].as_ref())
+        });
+        layered
+            .chain(excludes)
+            .map(|rules| rules.matched(path, is_dir))
+            .find(|found| !found.is_none())
+            .is_some_and(|found| found.is_ignore())
+    }
+
+    fn dir_files(&self, dir: &Path) -> Arc<DirIgnoreFiles> {
+        if let Some(files) = self.dirs.lock().get(dir) {
+            return Arc::clone(files);
+        }
+        let custom: Vec<&str> = self.custom_names.iter().map(String::as_str).collect();
+        let files = Arc::new([
+            load_ignore_files(dir, &custom),
+            load_ignore_files(dir, &[".ignore"]),
+            load_ignore_files(dir, &[".gitignore"]),
+        ]);
+        self.dirs
+            .lock()
+            .insert(dir.to_path_buf(), Arc::clone(&files));
+        files
+    }
+}
+
+fn load_ignore_files(dir: &Path, names: &[&str]) -> Option<Gitignore> {
+    let mut builder = GitignoreBuilder::new(dir);
+    let mut found = false;
+    for name in names {
+        let file = dir.join(name);
+        if file.is_file() {
+            found = true;
+            builder.add(file);
+        }
+    }
+    found.then(|| builder.build().ok()).flatten()
 }
 
 #[inline]

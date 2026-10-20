@@ -180,6 +180,47 @@ fn writes_inside_a_gitignored_directory_stay_incremental() {
 }
 
 #[test]
+fn an_ignored_ancestor_of_the_base_does_not_hide_its_events() {
+    // The base is the ignored directory itself, or a directory below it.
+    for base in ["target", "target/probe"] {
+        let f = Fixture::with_git_ignored_base(base);
+        f.write("old.txt", "old");
+        f.write("logs/.gitignore", "*.log\n");
+        f.index();
+        assert!(f.is_indexed("old.txt"), "{base}: the walk indexes the base");
+
+        f.write("new.txt", "new");
+        f.write("old.txt", "changed");
+        f.write("logs/kept.rs", "kept");
+        f.write("logs/run.log", "skipped");
+        let delta = f.feed([
+            create(f.path("new.txt")),
+            modify(f.path("old.txt")),
+            create(f.path("logs/kept.rs")),
+            create(f.path("logs/run.log")),
+        ]);
+
+        f.assert_no_rescan(&delta, "writes below a base inside an ignored directory");
+        assert!(
+            f.is_indexed("new.txt"),
+            "{base}: a created file must enter the index"
+        );
+        assert!(
+            f.is_indexed("old.txt"),
+            "{base}: a modified file must stay indexed"
+        );
+        assert!(
+            f.is_indexed("logs/kept.rs"),
+            "{base}: a nested file must enter the index"
+        );
+        assert!(
+            !f.is_indexed("logs/run.log"),
+            "{base}: an ignore file inside the base still applies, as in the walk"
+        );
+    }
+}
+
+#[test]
 fn ignored_event_batch_above_index_capacity_stays_incremental() {
     let f = Fixture::with_git();
     f.write(".gitignore", "node_modules/\n");
@@ -677,6 +718,16 @@ impl Fixture {
 
     fn with_git() -> Self {
         Self::build(true, false)
+    }
+
+    // The repository ignores `target/` and the picker opens `base` below it.
+    fn with_git_ignored_base(base: &str) -> Self {
+        let mut fixture = Self::build(true, false);
+        let root = fixture.base.clone();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fixture.base = root.join(base);
+        std::fs::create_dir_all(&fixture.base).unwrap();
+        fixture
     }
 
     // `SharedFrecency::noop()` silently drops `init`, so any test asserting on
