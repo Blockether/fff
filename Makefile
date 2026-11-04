@@ -16,6 +16,16 @@ SHELL := bash
 # string rather than the literal `-o` / `pipefail` tokens.
 .SHELLFLAGS := -o pipefail -euc
 
+# zlob's build script runs $(ZIG), and other Zig releases fail inside it.
+# Keep ZIG_VERSION equal to the pin in .github/workflows and flake.nix.
+ZIG_VERSION := 0.16.0
+ZIG ?= $(firstword $(wildcard /opt/homebrew/opt/zig@$(basename $(ZIG_VERSION))/bin/zig /usr/local/opt/zig@$(basename $(ZIG_VERSION))/bin/zig) zig)
+export ZIG
+ZIG_FOUND := $(shell $(ZIG) version 2>/dev/null)
+ifneq ($(ZIG_FOUND),$(ZIG_VERSION))
+$(warning zlob targets need Zig $(ZIG_VERSION), but '$(ZIG)' is '$(ZIG_FOUND)'. Run 'brew install zig@$(basename $(ZIG_VERSION))' or set ZIG=/path/to/zig.)
+endif
+
 .PHONY: build build-c-lib install uninstall test test-rust test-rescan test-rescan-known-defects rescan-probe test-c-smoke test-c-api test-lua test-lua-snap test-version test-bun test-node prepare-bun prepare-bun-packaged prepare-node set-npm-version header test-stress test-stress-seeded test-stress-random test-stress-regressions test-stress-repos test-node-stress sync-js-api sync-js-api-check bump-homebrew-formula bump-install-mcp-sh test-bun-compile bench-search bench-grep bench-definition
 
 all: format test lint
