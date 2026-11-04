@@ -446,7 +446,7 @@ impl BigramIndexBuilder {
         let encoded: Vec<Option<Vec<u8>>> = if kept.len() * words < PARALLEL_ENCODE_MIN_WORDS {
             kept.iter().map(encode).collect()
         } else {
-            crate::parallelism::BACKGROUND_THREAD_POOL
+            crate::parallelism::CONTENT_THREAD_POOL
                 .install(|| kept.par_iter().map(encode).collect())
         };
 
@@ -1108,10 +1108,10 @@ pub(crate) fn build_bigram_index(
 
     // Always reads each file into the thread-local READ_BUF — never aliases the
     // persistent mmap cache. See `read_bigram_chunk` for the rationale: this
-    // pass runs detached on the background pool without holding the picker
+    // pass runs detached on the content pool without holding the picker
     // read lock, so a watcher event mutating a `FileItem` would race any
     // borrow we took from a cached `Mmap`.
-    crate::parallelism::BACKGROUND_THREAD_POOL.install(|| {
+    crate::parallelism::CONTENT_THREAD_POOL.install(|| {
         files
             .par_chunks(BIGRAM_CHUNK_FILES)
             .enumerate()
@@ -1212,7 +1212,7 @@ pub(crate) fn release_thread_buffers() {
         READ_BUF.with_borrow_mut(|buf| *buf = Vec::new());
         NORM_BUF.with_borrow_mut(|buf| *buf = Vec::new());
     }
-    crate::parallelism::BACKGROUND_THREAD_POOL.spawn_broadcast(|_| release());
+    crate::parallelism::CONTENT_THREAD_POOL.spawn_broadcast(|_| release());
     release();
 }
 
@@ -1249,7 +1249,7 @@ mod tests {
 
         let (unblock, blocked) = mpsc::channel::<()>();
         let (started_tx, started) = mpsc::channel::<()>();
-        crate::parallelism::BACKGROUND_THREAD_POOL.spawn(move || {
+        crate::parallelism::CONTENT_THREAD_POOL.spawn(move || {
             let _ = started_tx.send(());
             let _ = blocked.recv_timeout(Duration::from_secs(10));
         });
@@ -1267,7 +1267,7 @@ mod tests {
 
         assert!(
             returned,
-            "release_thread_buffers waited for a busy background worker"
+            "release_thread_buffers waited for a busy content worker"
         );
     }
 

@@ -2515,10 +2515,13 @@ pub extern "C" fn tune_mimalloc() {
 pub(crate) fn hint_allocator_collect() {
     #[cfg(feature = "mimalloc-collect")]
     {
-        // Collect BACKGROUND_THREAD_POOL workers — that's where the bigram
-        // builder allocated memory. `rayon::broadcast` would target the global
-        // pool, which is the wrong set of threads.
-        BACKGROUND_THREAD_POOL.broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
+        // Collect the workers of both pools: the walk allocates on the background
+        // pool and the bigram builder on the content pool. `rayon::broadcast`
+        // would target the global pool. The spawned form does not wait for a
+        // worker that is busy with another scan.
+        BACKGROUND_THREAD_POOL.spawn_broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
+        crate::parallelism::CONTENT_THREAD_POOL
+            .spawn_broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
 
         // Main thread too.
         unsafe { libmimalloc_sys::mi_collect(true) };

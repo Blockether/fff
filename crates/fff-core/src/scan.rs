@@ -8,7 +8,7 @@ use crate::FileSync;
 use crate::error::Error;
 use crate::file_picker::FFFMode;
 use crate::index::{build_bigram_index, sniff_binary_for_non_indexable};
-use crate::parallelism::BACKGROUND_THREAD_POOL;
+use crate::parallelism::{BACKGROUND_THREAD_POOL, CONTENT_THREAD_POOL};
 use crate::shared::{SharedFilePicker, SharedFrecency};
 use crate::types::ContentCacheBudget;
 use crate::watch::BackgroundWatcher;
@@ -242,11 +242,13 @@ impl ScanJob {
             rescubscribe_watcher_post_scan(&shared_picker);
         }
 
-        // 3. Runs post scna in parallel with git status collection
+        // 3. Runs post scna in parallel with git status collection. The content pool
+        // keeps a long build from holding the workers that other scans need.
         if !signals.cancelled.load(Ordering::Acquire)
             && let Some(snap) = snapshot.as_ref()
         {
-            Self::run_post_scan(&shared_picker, &signals, &config, snap);
+            CONTENT_THREAD_POOL
+                .install(|| Self::run_post_scan(&shared_picker, &signals, &config, snap));
         }
 
         drop(snapshot); // SNAPSHOT SHOULD NOT BE USED AFTER THIS POINT
@@ -408,4 +410,85 @@ fn rescubscribe_watcher_post_scan(shared_picker: &SharedFilePicker) {
         watcher.request_watch_dir(dir.to_path_buf());
         std::ops::ControlFlow::Continue(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use crate::file_picker::{FFFMode, FilePicker};
+    use crate::parallelism::CONTENT_THREAD_POOL;
+    use crate::{FilePickerOptions, SharedFilePicker, SharedFrecency};
+
+    fn warmup_complete(picker: &SharedFilePicker) -> bool {
+        picker
+            .read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|p| p.get_scan_progress().is_warmup_complete)
+            })
+            .unwrap_or(false)
+    }
+
+    // vis#438: one large content build held every background worker, so a scan of
+    // a small directory in the same process stayed queued until the build ended.
+    #[test]
+    fn a_busy_content_pool_does_not_delay_a_path_scan() {
+        let workers = CONTENT_THREAD_POOL.current_num_threads();
+        let (unblock, blocked) = mpsc::channel::<()>();
+        let blocked = std::sync::Arc::new(std::sync::Mutex::new(blocked));
+        let (started_tx, started) = mpsc::channel::<()>();
+        for _ in 0..workers {
+            let blocked = std::sync::Arc::clone(&blocked);
+            let started_tx = started_tx.clone();
+            CONTENT_THREAD_POOL.spawn(move || {
+                let _ = started_tx.send(());
+                let _ = blocked
+                    .lock()
+                    .map(|rx| rx.recv_timeout(Duration::from_secs(10)));
+            });
+        }
+        for _ in 0..workers {
+            started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a content worker never started");
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "needle\n").unwrap();
+        let picker = SharedFilePicker::default();
+        FilePicker::new_with_shared_state(
+            picker.clone(),
+            SharedFrecency::default(),
+            FilePickerOptions {
+                base_path: tmp.path().to_string_lossy().to_string(),
+                enable_content_indexing: true,
+                mode: FFFMode::Ai,
+                watch: false,
+                ..Default::default()
+            },
+        )
+        .expect("init");
+
+        let scanned = picker.wait_for_scan(Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(200));
+        let built_while_busy = warmup_complete(&picker);
+        for _ in 0..workers {
+            let _ = unblock.send(());
+        }
+
+        assert!(scanned, "the path scan waited for the busy content pool");
+        assert!(
+            !built_while_busy,
+            "the content index was built outside the content pool"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !warmup_complete(&picker) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(warmup_complete(&picker), "the content index never finished");
+    }
 }

@@ -26,6 +26,32 @@ pub static BACKGROUND_THREAD_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|
         .expect("failed to create background rayon pool")
 });
 
+/// Content-index pool (bigram build and binary sniffing after a scan).
+///
+/// Kept apart from `BACKGROUND_THREAD_POOL`: one large build keeps every worker
+/// busy for minutes, and rayon runs a newly spawned scan only after that local
+/// work drains, so every other scan in the process waited for the build.
+pub static CONTENT_THREAD_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    let total = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads((total / 2).max(2))
+        .thread_name(|i| format!("fff-content-{i}"))
+        .start_handler(|_| {
+            #[cfg(target_os = "macos")]
+            unsafe {
+                let _ = libc::pthread_set_qos_class_self_np(
+                    libc::qos_class_t::QOS_CLASS_USER_INITIATED,
+                    0,
+                );
+            }
+        })
+        .build()
+        .expect("failed to create content rayon pool")
+});
+
 /// Grep pool sized to non-efficiency cores on macOS and full parallelism elsewhere.
 pub static SEARCH_THREAD_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     #[cfg(target_os = "macos")]
