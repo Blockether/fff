@@ -1,6 +1,7 @@
 use crate::constants::MAX_OVERFLOW_FILES;
 use crate::error::Error;
 use crate::file_picker::FFFMode;
+use crate::git::GitDiscovery;
 use crate::git_status_worker::GitStatusWorker;
 use crate::rescan_stats::RescanReason;
 use crate::shared::{SharedFilePicker, SharedFrecency};
@@ -47,7 +48,7 @@ impl BackgroundWatcher {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         base_path: PathBuf,
-        git_workdir: Option<PathBuf>,
+        git: Option<GitDiscovery>,
         shared_picker: SharedFilePicker,
         shared_frecency: SharedFrecency,
         mode: FFFMode,
@@ -94,12 +95,12 @@ impl BackgroundWatcher {
 
         let owner_weak_picker = shared_picker.weaken();
         let owner_frecency = shared_frecency.clone();
-        let owner_git_workdir = git_workdir.clone();
+        let owner_git_workdir = git.as_ref().map(|git| git.workdir.clone());
         let owner_git_worker = Arc::clone(&git_status_worker);
 
         let debouncer = Self::create_debouncer(
             base_path,
-            git_workdir,
+            git,
             shared_picker,
             shared_frecency,
             mode,
@@ -178,7 +179,7 @@ impl BackgroundWatcher {
     #[allow(clippy::too_many_arguments)]
     fn create_debouncer(
         base_path: PathBuf,
-        git_workdir: Option<PathBuf>,
+        git: Option<GitDiscovery>,
         shared_picker: SharedFilePicker,
         shared_frecency: SharedFrecency,
         mode: FFFMode,
@@ -192,7 +193,7 @@ impl BackgroundWatcher {
             // our own grep calls and preview window rendering
             .with_event_kinds(EventKindMask::CORE);
 
-        let git_workdir_for_handler = git_workdir.clone();
+        let git_workdir_for_handler = git.as_ref().map(|git| git.workdir.clone());
         let base_path_for_handler = base_path.clone();
         let shared_picker_for_watching = shared_picker.clone();
         let file_picker = shared_picker.weaken();
@@ -295,7 +296,10 @@ impl BackgroundWatcher {
         // The .git directory is excluded from the file list but we still need
         // to observe changes that affect git status (staging, unstaging,
         // committing, branch switches, merges, etc)
-        watch_git_status_paths(&mut debouncer, git_workdir.as_ref());
+        watch_git_status_paths(
+            &mut debouncer,
+            git.as_ref().map(|git| git.git_dir.as_path()),
+        );
 
         Ok(debouncer)
     }
@@ -460,7 +464,12 @@ pub(crate) fn handle_debounced_events(
                 need_full_git_rescan = true;
             }
 
-            if is_git_file(path) {
+            // bare repos keep worktree git dirs outside of any `.git` component
+            if is_git_file(path)
+                || repo
+                    .as_ref()
+                    .is_some_and(|repo| path.starts_with(repo.path()))
+            {
                 continue;
             }
 
@@ -746,6 +755,12 @@ pub(crate) fn handle_debounced_events(
     // This runs after apply_changes so the picker write lock is released.
     if mode.is_ai() && !paths_to_add_or_modify.is_empty() {
         let mut tracked_count = 0usize;
+        let shared_base = shared_picker.read().ok().and_then(|guard| {
+            guard
+                .as_ref()?
+                .worktree_shared_base()
+                .map(Path::to_path_buf)
+        });
         if let Ok(frecency_guard) = shared_frecency.read()
             && let Some(ref frecency) = *frecency_guard
         {
@@ -760,7 +775,10 @@ pub(crate) fn handle_debounced_events(
                     continue;
                 }
 
-                if let Err(e) = frecency.track_access(path) {
+                let shared = shared_base
+                    .as_deref()
+                    .and_then(|shared_base| crate::git::shared_twin(path, base_path, shared_base));
+                if let Err(e) = frecency.track_access_shared(path, shared.as_deref()) {
                     error!("Failed to track frecency for {:?}: {:?}", path, e);
                 } else {
                     tracked_count += 1;
@@ -1226,20 +1244,16 @@ fn is_dotgit_change_affecting_status(changed: &Path, repo: &Option<Repository>) 
     false
 }
 
-fn watch_git_status_paths(debouncer: &mut Debouncer, git_workdir: Option<&PathBuf>) {
-    let Some(workdir) = git_workdir else {
+// `git_dir` is `.git/worktrees/<name>` for linked worktrees, whose `.git` is a file.
+fn watch_git_status_paths(debouncer: &mut Debouncer, git_dir: Option<&Path>) {
+    let Some(git_dir) = git_dir.filter(|git_dir| git_dir.is_dir()) else {
         return;
     };
-
-    let git_dir = workdir.join(".git");
-    if !git_dir.is_dir() {
-        return;
-    }
 
     // We have tried to be smart about the internal git state but
     // it appeared more harmful that it's worth it, so we just watch
     // for the most obvious paths like HEAD, MERGE_HEAD, index.lock
-    if let Err(e) = debouncer.watch(&git_dir, RecursiveMode::NonRecursive) {
+    if let Err(e) = debouncer.watch(git_dir, RecursiveMode::NonRecursive) {
         warn!("Failed to watch .git directory: {}", e);
     }
 

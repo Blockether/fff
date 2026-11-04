@@ -282,7 +282,7 @@ fn file_item(path: &Path, rel_path: &str, metadata: Option<&std::fs::Metadata>) 
         size,
         modified,
         None,
-        crate::file_picker::is_known_binary_extension(path),
+        crate::file_picker::is_binary_file(path),
     );
     item.mark_definition_language(rel_path);
     item

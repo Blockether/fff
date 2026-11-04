@@ -417,7 +417,7 @@ pub unsafe extern "C" fn fff_search(
         FuzzySearchOptions {
             max_threads: max_threads as usize,
             current_file: current_file_str,
-            project_path: Some(picker.base_path()),
+            project_path: Some(picker.shared_base_path()),
             combo_boost_score_multiplier: combo_boost_multiplier,
             min_combo_count,
             pagination: PaginationArgs {
@@ -479,7 +479,7 @@ pub unsafe extern "C" fn fff_glob(
         FuzzySearchOptions {
             max_threads: max_threads as usize,
             current_file: current_file_str,
-            project_path: Some(picker.base_path()),
+            project_path: Some(picker.shared_base_path()),
             combo_boost_score_multiplier: 0,
             min_combo_count: 0,
             pagination: PaginationArgs {
@@ -543,7 +543,7 @@ pub unsafe extern "C" fn fff_search_directories(
         FuzzySearchOptions {
             max_threads: max_threads as usize,
             current_file: current_file_str,
-            project_path: Some(picker.base_path()),
+            project_path: Some(picker.shared_base_path()),
             combo_boost_score_multiplier: 0,
             min_combo_count: 0,
             pagination: PaginationArgs {
@@ -694,7 +694,7 @@ pub unsafe extern "C" fn fff_search_mixed(
         FuzzySearchOptions {
             max_threads: max_threads as usize,
             current_file: current_file_str,
-            project_path: Some(picker.base_path()),
+            project_path: Some(picker.shared_base_path()),
             combo_boost_score_multiplier: combo_boost_multiplier,
             min_combo_count,
             pagination: PaginationArgs {
@@ -1259,13 +1259,16 @@ pub unsafe extern "C" fn fff_track_query(
         Err(e) => return FffResult::err(&format!("Failed to canonicalize path: {}", e)),
     };
 
-    let project_path = {
+    let (project_path, file_path) = {
         let guard = match inst.picker.read() {
             Ok(g) => g,
             Err(_) => return FffResult::ok_int(0),
         };
         match guard.as_ref() {
-            Some(p) => p.base_path().to_path_buf(),
+            Some(p) => (
+                p.shared_base_path().to_path_buf(),
+                p.shared_path_for(&file_path).unwrap_or(file_path),
+            ),
             None => return FffResult::ok_int(0),
         }
     };
@@ -1304,7 +1307,7 @@ pub unsafe extern "C" fn fff_get_historical_query(
             Err(_) => return FffResult::ok_empty(),
         };
         match guard.as_ref() {
-            Some(p) => p.base_path().to_path_buf(),
+            Some(p) => p.shared_base_path().to_path_buf(),
             None => return FffResult::ok_empty(),
         }
     };
