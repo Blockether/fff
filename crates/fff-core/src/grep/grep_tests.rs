@@ -48,6 +48,45 @@ fn invalid_regex_error_survives_empty_literal_prefilter() {
 }
 
 #[test]
+fn change_during_index_build_stays_visible() {
+    let root = tempfile::tempdir().unwrap();
+    // No file holds both words, so the finished index rules out every file.
+    for index in 0..128 {
+        let content = if index % 2 == 0 {
+            "alpha fresh"
+        } else {
+            "beta needle"
+        };
+        std::fs::write(root.path().join(format!("file_{index}.txt")), content).unwrap();
+    }
+    let mut picker = FilePicker::new(FilePickerOptions {
+        base_path: root.path().to_string_lossy().into_owned(),
+        watch: false,
+        ..Default::default()
+    })
+    .unwrap();
+    picker.collect_files().unwrap();
+    // A scan opens the overlay at commit, then the index build reads the old content.
+    picker.open_bigram_overlay();
+    let builder = BigramIndexBuilder::new(picker.get_files().len());
+    let skip = BigramIndexBuilder::new(picker.get_files().len());
+    for (index, file) in picker.get_files().iter().enumerate() {
+        let content = std::fs::read(root.path().join(file.relative_path(&picker))).unwrap();
+        builder.add_file_content(&skip, index, &content);
+    }
+
+    let changed = root.path().join("file_7.txt");
+    std::fs::write(&changed, "fresh needle").unwrap();
+    assert!(picker.handle_create_or_modify(&changed).is_some());
+    let query = parse_grep_query("fresh needle");
+    let options = GrepSearchOptions::default();
+    assert_eq!(picker.grep(&query, &options).matches.len(), 1);
+
+    picker.set_bigram_index(builder.compress(None));
+    assert_eq!(picker.grep(&query, &options).matches.len(), 1);
+}
+
+#[test]
 fn sparse_matches_after_empty_batches_preserve_pagination() {
     let root = tempfile::tempdir().unwrap();
     for index in 0..1536 {

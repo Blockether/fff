@@ -853,6 +853,23 @@ struct FffResult *fff_scan_files(void *fff_handle);
 struct FffResult *fff_rescan_blocking(void *fff_handle, uint64_t timeout_ms);
 
 /**
+ * Apply changes at the given paths now and BLOCK until queries see them.
+ *
+ * Read-your-writes after the caller's own writes, without a rescan: it costs a
+ * stat and a read for each path and does not wait for the content index. A
+ * deleted path leaves the index; a new directory is indexed; an ignore file
+ * change starts a full rescan and the call waits for its walk.
+ *
+ * `paths` is a `\n`-separated list of absolute paths; lines are not trimmed.
+ * Returns an int result: `1` when the changes are visible, `0` on timeout.
+ *
+ * ## Safety
+ * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+ * `paths` must be NULL or a valid null-terminated UTF-8 string.
+ */
+struct FffResult *fff_refresh_paths(void *fff_handle, const char *paths, uint64_t timeout_ms);
+
+/**
  * Check if a scan is currently in progress.
  *
  * ## Safety

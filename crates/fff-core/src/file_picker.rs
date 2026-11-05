@@ -1549,7 +1549,16 @@ impl FilePicker {
 
     pub(crate) fn set_bigram_index(&mut self, index: BigramFilter) {
         self.sync_data.bigram_index = Some(Arc::new(index));
-        // once the index is reset automatically reset the overaly
+        // An overlay opened at commit keeps the changes made while the index was building.
+        if self.sync_data.bigram_overlay.is_none() {
+            self.open_bigram_overlay();
+        }
+    }
+
+    /// Start recording content changes for the bigram index of the current file list.
+    /// Open it before the index build reads any file: a change made during the build
+    /// would otherwise be lost, and the finished index would hide the changed file.
+    pub(crate) fn open_bigram_overlay(&mut self) {
         self.sync_data.bigram_overlay = Some(Arc::new(parking_lot::RwLock::new(
             BigramOverlay::new(self.sync_data.indexable_count),
         )));

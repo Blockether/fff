@@ -1005,6 +1005,45 @@ pub unsafe extern "C" fn fff_rescan_blocking(
     FffResult::ok_int(completed as i64)
 }
 
+/// Apply changes at the given paths now and BLOCK until queries see them.
+///
+/// Read-your-writes after the caller's own writes, without a rescan: it costs a
+/// stat and a read for each path and does not wait for the content index. A
+/// deleted path leaves the index; a new directory is indexed; an ignore file
+/// change starts a full rescan and the call waits for its walk.
+///
+/// `paths` is a `\n`-separated list of absolute paths; lines are not trimmed.
+/// Returns an int result: `1` when the changes are visible, `0` on timeout.
+///
+/// ## Safety
+/// `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+/// `paths` must be NULL or a valid null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_refresh_paths(
+    fff_handle: *mut c_void,
+    paths: *const c_char,
+    timeout_ms: u64,
+) -> *mut FffResult {
+    let inst = match unsafe { instance_ref(fff_handle) } {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    let paths: Vec<PathBuf> = unsafe { optional_cstr(paths) }
+        .map(|s| {
+            s.split('\n')
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let completed =
+        inst.picker
+            .refresh_paths(&inst.frecency, &paths, Duration::from_millis(timeout_ms));
+    FffResult::ok_int(completed as i64)
+}
+
 /// Check if a scan is currently in progress.
 ///
 /// ## Safety

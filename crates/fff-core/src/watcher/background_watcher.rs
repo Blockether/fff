@@ -817,7 +817,7 @@ pub(crate) fn handle_debounced_events(
     new_dirs_to_watch
 }
 
-fn index_new_directory(
+pub(crate) fn index_new_directory(
     dir: &Path,
     shared_picker: &SharedFilePicker,
     shared_frecency: &SharedFrecency,

@@ -14,8 +14,13 @@ use crate::query_tracker::QueryTracker;
 use crate::rescan_stats::{RescanCounters, RescanReason, RescanStats};
 use crate::rescan_throttle::RescanThrottle;
 use crate::scan::ScanJob;
-use crate::watch::{WatchEvent, WatchId, WatchOptions, WatchRegistry};
+use crate::watch::{
+    WatchEvent, WatchId, WatchOptions, WatchRegistry, handle_debounced_events, index_new_directory,
+};
 use git2::Repository;
+use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+use notify::{Event, EventKind};
+use notify_debouncer_full::DebouncedEvent;
 
 /// Poll `<git_dir>/index.lock` until it disappears (git write completed), giving up
 /// after [`GIT_LOCK_MAX_WAIT`]. Used by [`SharedPicker::refresh_git_status`]
@@ -309,6 +314,86 @@ impl SharedFilePicker {
         // 2. `ScanJob::spawn` sets `scanning` BEFORE returning, so there is no
         //    window where we could observe "already done" and return early.
         self.wait_for_indexing_complete(remaining(deadline))
+    }
+
+    /// Apply the changes at `paths` now, as the watcher applies its events, and BLOCK
+    /// until queries see them. Returns `false` on timeout.
+    ///
+    /// Read-your-writes without a rescan: it costs a stat and a read for each path,
+    /// not a walk of the tree, and it does not wait for the content index. The watcher
+    /// applies the same events again later; that second apply changes nothing.
+    ///
+    /// - A walk that runs at the call is awaited first, because its commit would drop
+    ///   changes made to the old file list.
+    /// - A new directory is walked and indexed. A deleted path leaves the index.
+    /// - A change that needs a full rescan (for example an ignore file) starts one, and
+    ///   the call waits for its walk.
+    pub fn refresh_paths(
+        &self,
+        shared_frecency: &SharedFrecency,
+        paths: &[PathBuf],
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        let remaining = |deadline: Instant| deadline.saturating_duration_since(Instant::now());
+
+        if !self.wait_for_scan(remaining(deadline)) {
+            return false;
+        }
+
+        let (mode, base_path, git_workdir, git_status_worker, signals) = {
+            let Ok(guard) = self.read() else {
+                return false;
+            };
+            let Some(picker) = guard.as_ref() else {
+                return true;
+            };
+            (
+                picker.mode(),
+                picker.base_path().to_path_buf(),
+                picker.git_root().map(Path::to_path_buf),
+                Arc::clone(&picker.git_status_worker),
+                picker.scan_signals(),
+            )
+        };
+
+        let now = Instant::now();
+        let events = paths
+            .iter()
+            .map(|path| {
+                let kind = match std::fs::metadata(path) {
+                    Ok(metadata) if metadata.is_dir() => EventKind::Create(CreateKind::Folder),
+                    Ok(_) => EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                    Err(_) => EventKind::Remove(RemoveKind::Any),
+                };
+                DebouncedEvent::new(Event::new(kind).add_path(path.clone()), now)
+            })
+            .collect();
+
+        let new_dirs = handle_debounced_events(
+            mode,
+            events,
+            &base_path,
+            &git_workdir,
+            self,
+            shared_frecency,
+            &git_status_worker,
+        );
+        for dir in new_dirs {
+            index_new_directory(
+                &dir,
+                self,
+                shared_frecency,
+                &git_workdir,
+                &git_status_worker,
+            );
+        }
+
+        // A full rescan that the events started, or deferred behind post-scan indexing.
+        poll_until(remaining(deadline), || {
+            !signals.scanning.load(Ordering::Acquire)
+                && !signals.rescan_pending.load(Ordering::Acquire)
+        })
     }
 
     /// Subscribe to filesystem changes matching `pattern`.

@@ -205,6 +205,9 @@ impl ScanJob {
 
             let live_count = sync.live_count;
             picker.commit_new_sync(sync);
+            if config.content_indexing {
+                picker.open_bigram_overlay();
+            }
             git_status_worker = Arc::clone(&picker.git_status_worker);
 
             if config.auto_cache_budget && !picker.has_explicit_cache_budget() {

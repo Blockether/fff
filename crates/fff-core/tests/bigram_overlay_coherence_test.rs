@@ -1305,6 +1305,53 @@ fn bigram_overlay_coherence_fuzzy_and_grep_combined() {
     stop_picker(&shared_picker);
 }
 
+/// `refresh_paths` makes the caller's own writes visible at once, with no watcher
+/// and no rescan: an edit, a new file in a new directory and a delete.
+#[test]
+fn refresh_paths_shows_own_writes_without_rescan() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path();
+
+    let files = seed_realistic_repo(base);
+    git_init_and_commit(base);
+
+    let (shared_picker, shared_frecency) = make_picker(base);
+    wait_for_bigram(&shared_picker);
+    let index_before = {
+        let guard = shared_picker.read().unwrap();
+        guard.as_ref().unwrap().bigram_index().unwrap() as *const _
+    };
+
+    let (edited, old_token) = &files[0];
+    let (deleted, deleted_token) = &files[1];
+    write_file_with_token(base, edited, "REFRESHED_EDIT_TOKEN");
+    fs::create_dir_all(base.join("src/fresh")).unwrap();
+    write_file_with_token(base, "src/fresh/new.rs", "REFRESHED_NEW_TOKEN");
+    fs::remove_file(base.join(deleted)).unwrap();
+
+    let paths = [
+        base.join(edited),
+        base.join("src/fresh"),
+        base.join(deleted),
+    ];
+    assert!(shared_picker.refresh_paths(&shared_frecency, &paths, Duration::from_secs(10)));
+
+    {
+        let guard = shared_picker.read().unwrap();
+        let picker = guard.as_ref().unwrap();
+        assert_eq!(grep_count(picker, "REFRESHED_EDIT_TOKEN"), 1);
+        assert_eq!(grep_count(picker, "REFRESHED_NEW_TOKEN"), 1);
+        assert_eq!(grep_count(picker, old_token), 0);
+        assert_eq!(grep_count(picker, deleted_token), 0);
+        assert!(
+            std::ptr::eq(index_before, picker.bigram_index().unwrap()),
+            "refresh_paths must not rebuild the content index"
+        );
+    }
+
+    stop_picker(&shared_picker);
+}
+
 fn grep_opts() -> GrepSearchOptions {
     GrepSearchOptions {
         max_file_size: 10 * 1024 * 1024,
