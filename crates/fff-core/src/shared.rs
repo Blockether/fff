@@ -63,6 +63,29 @@ fn poll_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     true
 }
 
+/// `path` in the form that the watcher reports and the picker base uses.
+///
+/// On Windows the picker canonicalizes its base, so a caller path with an 8.3 short
+/// name or another casing does not match it. A deleted path cannot be canonicalized,
+/// so its parent is canonicalized and its name is attached again.
+#[cfg(windows)]
+fn event_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = crate::path_utils::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => crate::path_utils::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+#[cfg(not(windows))]
+fn event_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 /// Thread-safe shared handle to the [`FilePicker`] instance.
 /// This accumulates only asynchronous non-blocking operations against the
 /// file picker: creating, triggering various rescans and so on.
@@ -360,13 +383,15 @@ impl SharedFilePicker {
         let now = Instant::now();
         let events = paths
             .iter()
+            .map(|path| event_path(path))
+            .filter(|path| path.starts_with(&base_path))
             .map(|path| {
-                let kind = match std::fs::metadata(path) {
+                let kind = match std::fs::metadata(&path) {
                     Ok(metadata) if metadata.is_dir() => EventKind::Create(CreateKind::Folder),
                     Ok(_) => EventKind::Modify(ModifyKind::Data(DataChange::Content)),
                     Err(_) => EventKind::Remove(RemoveKind::Any),
                 };
-                DebouncedEvent::new(Event::new(kind).add_path(path.clone()), now)
+                DebouncedEvent::new(Event::new(kind).add_path(path), now)
             })
             .collect();
 

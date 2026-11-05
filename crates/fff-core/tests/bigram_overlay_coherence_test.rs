@@ -1329,10 +1329,12 @@ fn refresh_paths_shows_own_writes_without_rescan() {
     write_file_with_token(base, "src/fresh/new.rs", "REFRESHED_NEW_TOKEN");
     fs::remove_file(base.join(deleted)).unwrap();
 
+    let outside = TempDir::new().unwrap();
     let paths = [
         base.join(edited),
         base.join("src/fresh"),
         base.join(deleted),
+        outside.path().join("outside.rs"),
     ];
     assert!(shared_picker.refresh_paths(&shared_frecency, &paths, Duration::from_secs(10)));
 
