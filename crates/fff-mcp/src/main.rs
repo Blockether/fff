@@ -92,6 +92,19 @@ pub(crate) struct Args {
     #[arg(long = "no-watch")]
     no_watch: bool,
 
+    /// Index with all cores (performance cores on macOS) instead of half of them.
+    /// Faster startup on very large repos, but uses more CPU and searches made
+    /// while indexing wait for it. Also settable via FFF_FULL_PARALLEL_INDEXING=1.
+    #[arg(
+        long = "full-parallel-indexing",
+        env = "FFF_FULL_PARALLEL_INDEXING",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    full_parallel_indexing: bool,
+
     /// No effect: a search reads file content and keeps none of it. The
     /// option stays so that existing commands still start.
     /// Also settable via the FFF_MAX_CACHED_FILES environment variable.
@@ -273,6 +286,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         !args.no_warmup
     };
+
+    fff::set_full_parallel_indexing(args.full_parallel_indexing);
 
     // Initialize file picker (spawns background scan + watcher)
     FilePicker::new_with_shared_state(

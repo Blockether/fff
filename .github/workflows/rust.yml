@@ -45,7 +45,7 @@ jobs:
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
@@ -65,6 +65,12 @@ jobs:
           RUSTC_WRAPPER: sccache
         # fff-python requires full python o3 machinery which is very slow
         run: cargo test --no-default-features --features zlob --workspace --exclude fff-nvim --exclude fff-python
+
+      - name: Test hidden paths with the ripgrep watcher
+        if: runner.os == 'Linux'
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo test -p fff-search --test new_directory_watcher_test -- non_git_watcher_skips_hidden_paths --exact
 
   stress-test:
     name: Fuzz Tests
@@ -89,7 +95,7 @@ jobs:
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
@@ -180,7 +186,7 @@ jobs:
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

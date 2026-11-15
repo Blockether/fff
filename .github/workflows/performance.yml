@@ -1,0 +1,198 @@
+name: FFF performance
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: fff-performance
+  queue: max
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  PERF_PATHS: |-
+    Cargo.toml
+    Cargo.lock
+    .cargo/config.toml
+    crates/fff-core/Cargo.toml
+    crates/fff-core/**/*.rs
+    crates/fff-grep/Cargo.toml
+    crates/fff-grep/**/*.rs
+    crates/fff-query-parser/Cargo.toml
+    crates/fff-query-parser/**/*.rs
+
+jobs:
+  plan:
+    if: >-
+      github.repository == 'dmtrKovalenko/fff' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'pull_request' &&
+        (github.event.action != 'labeled' || github.event.label.name == 'perf-check')))
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+      statuses: write
+    outputs:
+      kind: ${{ steps.resolve.outputs.kind }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve the benchmark revision
+        id: resolve
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FORCE: ${{ contains(github.event.pull_request.labels.*.name, 'perf-check') }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            printf 'kind=calibrate\nbase_sha=5d21e4bbdf33a09f58975636208e30747bc8d918\n' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+            --jq 'select(.state == "open") | .head.sha')
+          [[ "$actual" == "$HEAD_SHA" ]] || exit 0
+          url="https://github.com/$GITHUB_REPOSITORY.git"
+          BASE_SHA=$(git ls-remote --exit-code "$url" refs/heads/main | cut -f1)
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          kind=pr
+          if [[ "$FORCE" != true ]]; then
+            repo=$(mktemp -d)
+            trap 'rm -rf -- "$repo"' EXIT
+            git init -q --bare "$repo"
+            git -C "$repo" fetch -q --no-tags --filter=blob:none "$url" "$BASE_SHA" "$HEAD_SHA"
+            mapfile -t paths <<<"$PERF_PATHS"
+            git --glob-pathspecs -C "$repo" diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" \
+              -- "${paths[@]}" >"$repo/changed"
+            if [[ ! -s "$repo/changed" ]]; then
+              kind=skip
+            fi
+          fi
+          printf 'kind=%s\nbase_sha=%s\nhead_sha=%s\n' "$kind" "$BASE_SHA" "$HEAD_SHA" >>"$GITHUB_OUTPUT"
+          printf '%s %s %s\n' "$kind" "$PR_NUMBER" "$BASE_SHA" >"$RUNNER_TEMP/comparison"
+      - name: Save the comparison for publication
+        if: steps.resolve.outputs.kind == 'pr' || steps.resolve.outputs.kind == 'skip'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fff-plan
+          path: ${{ runner.temp }}/comparison
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+      - name: Mark the PR check pending
+        if: >-
+          steps.resolve.outputs.kind == 'pr' &&
+          github.event.pull_request.head.repo.id == github.event.repository.id &&
+          github.actor != 'dependabot[bot]'
+        env:
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f context='FFF performance' \
+            -f state=pending -f description='Queued for measurement on load' -f target_url="$RUN_URL" >/dev/null
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.kind == 'pr' || needs.plan.outputs.kind == 'calibrate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      matrix:
+        variant: ${{ fromJSON(needs.plan.outputs.kind == 'pr' && '["base","head"]' || '["base"]') }}
+    steps:
+      - name: Fetch source and benchmark harness
+        env:
+          HARNESS: ${{ github.sha }}
+          REVISION: ${{ matrix.variant == 'base' && needs.plan.outputs.base_sha || needs.plan.outputs.head_sha }}
+        run: |
+          [[ "$HARNESS" =~ ^[0-9a-f]{40}$ && "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+          repo=https://github.com/dmtrKovalenko/fff.git
+          git init -q source
+          git -C source fetch -q --depth=1 "$repo" "$HARNESS" "$REVISION"
+          git -C source show "$HARNESS:perf/build.sh" > "$RUNNER_TEMP/build.sh"
+          git -C source -c core.hooksPath=/dev/null checkout -q --detach "$REVISION"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+          use-cache: false
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
+        with:
+          toolchain: 1.99.1
+          target: x86_64-unknown-linux-musl
+          cache: false
+          rustflags: ''
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version 0.24.1 --locked
+      - name: Build the FFF core benchmarks
+        run: |
+          token=$(cat /proc/sys/kernel/random/uuid)
+          printf '::stop-commands::%s\n' "$token"
+          trap 'printf "::%s::\n" "$token"' EXIT
+          bash "$RUNNER_TEMP/build.sh" source "$RUNNER_TEMP/fff-build"
+      - name: Upload benchmark binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: fff-bench-${{ matrix.variant }}
+          path: ${{ runner.temp }}/fff-build/bins
+          if-no-files-found: error
+          retention-days: 2
+          overwrite: true
+
+  measure:
+    needs: [plan, build]
+    runs-on: [self-hosted, linux, x64, fff-perf-load]
+    timeout-minutes: 45
+    steps:
+      - name: Fetch measurement script
+        env:
+          HARNESS: ${{ github.sha }}
+        run: |
+          [[ "$HARNESS" =~ ^[0-9a-f]{40}$ ]]
+          repo=$(mktemp -d)
+          trap 'rm -rf -- "$repo"' EXIT
+          git init -q "$repo"
+          git -C "$repo" fetch -q --depth=1 https://github.com/dmtrKovalenko/fff.git "$HARNESS"
+          git -C "$repo" show "$HARNESS:perf/benchmark.sh" > "$RUNNER_TEMP/benchmark.sh"
+      - name: Download benchmark binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fff-bench-*
+          path: ${{ runner.temp }}/fff-binaries
+      - name: Measure on load
+        id: measure
+        env:
+          KIND: ${{ needs.plan.outputs.kind }}
+          BASE: ${{ needs.plan.outputs.base_sha }}
+        run: |
+          token=$(cat /proc/sys/kernel/random/uuid)
+          printf '::stop-commands::%s\n' "$token"
+          trap 'printf "::%s::\n" "$token"' EXIT
+          script="$RUNNER_TEMP/benchmark.sh"
+          binaries="$RUNNER_TEMP/fff-binaries"
+          output="$RUNNER_TEMP/fff-results"
+          mkdir -p "$output"
+          case "$KIND" in
+            pr) bash "$script" compare "$output" "$binaries/fff-bench-base" "$binaries/fff-bench-head" ;;
+            calibrate) bash "$script" calibrate "$output" "$binaries/fff-bench-base" "$BASE" ;;
+            *) exit 1 ;;
+          esac 2>&1 | tee "$output/benchmark.log"
+      - name: Upload measurement logs and timings
+        if: ${{ !cancelled() && (steps.measure.outcome == 'success' || steps.measure.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fff-measurements
+          path: |
+            ${{ runner.temp }}/fff-results/*.bench
+            ${{ runner.temp }}/fff-results/benchmark.log
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true

@@ -15,7 +15,8 @@ use crate::rescan_stats::{RescanCounters, RescanReason, RescanStats};
 use crate::rescan_throttle::RescanThrottle;
 use crate::scan::ScanJob;
 use crate::watch::{
-    WatchEvent, WatchId, WatchOptions, WatchRegistry, handle_debounced_events, index_new_directory,
+    WatchEvent, WatchId, WatchOptions, WatchRegistry, WatcherOptions, handle_debounced_events,
+    index_new_directory,
 };
 use git2::Repository;
 use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
@@ -364,7 +365,7 @@ impl SharedFilePicker {
             return false;
         }
 
-        let (mode, base_path, git_workdir, git_status_worker, signals) = {
+        let (options, base_path, git_workdir, git_status_worker, signals) = {
             let Ok(guard) = self.read() else {
                 return false;
             };
@@ -372,7 +373,13 @@ impl SharedFilePicker {
                 return true;
             };
             (
-                picker.mode(),
+                WatcherOptions {
+                    mode: picker.mode(),
+                    follow_symlinks: picker.follows_symlinks(),
+                    ignore_options: picker.ignore_options().clone(),
+                    enable_fs_root_scanning: picker.fs_root_scanning_enabled(),
+                    enable_home_dir_scanning: picker.home_dir_scanning_enabled(),
+                },
                 picker.base_path().to_path_buf(),
                 picker.git_root().map(Path::to_path_buf),
                 Arc::clone(&picker.git_status_worker),
@@ -396,7 +403,7 @@ impl SharedFilePicker {
             .collect();
 
         let new_dirs = handle_debounced_events(
-            mode,
+            &options,
             events,
             &base_path,
             &git_workdir,
@@ -407,6 +414,8 @@ impl SharedFilePicker {
         for dir in new_dirs {
             index_new_directory(
                 &dir,
+                &base_path,
+                &options,
                 self,
                 shared_frecency,
                 &git_workdir,

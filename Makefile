@@ -18,7 +18,7 @@ SHELL := bash
 
 # zlob's build script runs $(ZIG), and other Zig releases fail inside it.
 # Keep ZIG_VERSION equal to the pin in .github/workflows and flake.nix.
-ZIG_VERSION := 0.16.0
+ZIG_VERSION := 0.17.1
 ZIG ?= $(firstword $(wildcard /opt/homebrew/opt/zig@$(basename $(ZIG_VERSION))/bin/zig /usr/local/opt/zig@$(basename $(ZIG_VERSION))/bin/zig) zig)
 export ZIG
 ZIG_FOUND := $(shell $(ZIG) version 2>/dev/null)

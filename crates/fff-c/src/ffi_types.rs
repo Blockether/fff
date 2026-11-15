@@ -2,6 +2,7 @@
 //! read directly from any language with C FFI — no JSON serialization.
 
 use std::ffi::{CString, c_char, c_void};
+use std::mem::offset_of;
 use std::ptr;
 
 use fff::file_picker::FilePicker;
@@ -12,12 +13,9 @@ use fff::{
 };
 
 /// Current used version of [`FffCreateOptions`].
-pub const FFF_CREATE_OPTIONS_VERSION: u32 = 4;
+pub const FFF_CREATE_OPTIONS_VERSION: u32 = 5;
 
-/// Options for `fff_create_instance_with`.
-///
-/// Versioned struct: the layout is stable across releases, new fields are
-/// only appended.
+/// Append-only options for `fff_create_instance_with`.
 #[repr(C)]
 pub struct FffCreateOptions {
     /// Set to [`FFF_CREATE_OPTIONS_VERSION`] when allocating; tells the
@@ -79,11 +77,17 @@ pub struct FffCreateOptions {
     /// ignore file dropped (whitelist; loses to `exclude_globs`). Ignored when
     /// `respect_ignore_files` is false — nothing was ignored to begin with.
     pub unignore_globs: *const c_char,
-    // ----- new version 5+ fields go here, ALWAYS appended -----
+    // ----- v5 fields -----
+    /// Additional newline-separated `.gitignore` rules. NULL for none. Requires zlob.
+    pub extra_ignore: *const c_char,
+    /// Skip Git integration and Git ignore rules. Requires zlob.
+    pub disable_git: bool,
+    /// Skip rules from `.ignore` files. Requires zlob.
+    pub disable_ignore_files: bool,
+    // ----- new version 6+ fields go here, ALWAYS appended -----
 }
 
 impl FffCreateOptions {
-    /// Default values for a v1 options struct.
     pub fn defaults() -> Self {
         Self {
             version: FFF_CREATE_OPTIONS_VERSION,
@@ -106,7 +110,31 @@ impl FffCreateOptions {
             custom_ignore_filenames: ptr::null(),
             exclude_globs: ptr::null(),
             unignore_globs: ptr::null(),
+            extra_ignore: ptr::null(),
+            disable_git: false,
+            disable_ignore_files: false,
         }
+    }
+
+    pub(crate) unsafe fn read_versioned(opts: *const Self, version: u32) -> Self {
+        let prefix_len = match version {
+            1 => offset_of!(Self, follow_symlinks),
+            2 => offset_of!(Self, respect_ignore_files),
+            3 => offset_of!(Self, respect_ignore_files) + size_of::<bool>(),
+            4 => offset_of!(Self, extra_ignore),
+            _ => return unsafe { opts.read() },
+        };
+
+        // Older callers may allocate only the prefix for their version.
+        let mut options = Self::defaults();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                opts.cast::<u8>(),
+                (&raw mut options).cast::<u8>(),
+                prefix_len,
+            );
+        }
+        options
     }
 }
 
@@ -881,7 +909,10 @@ mod options_layout_tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn fff_create_options_layout_is_stable_64bit() {
-        assert_eq!(size_of::<FffCreateOptions>(), 112);
+        assert_eq!(size_of::<crate::LegacyCreateOptions>(), 88);
+        assert_eq!(align_of::<crate::LegacyCreateOptions>(), 8);
+        assert_eq!(offset_of!(crate::LegacyCreateOptions, follow_symlinks), 82);
+        assert_eq!(size_of::<FffCreateOptions>(), 128);
         assert_eq!(align_of::<FffCreateOptions>(), 8);
 
         assert_eq!(offset_of!(FffCreateOptions, version), 0);
@@ -905,5 +936,9 @@ mod options_layout_tests {
         assert_eq!(offset_of!(FffCreateOptions, custom_ignore_filenames), 88);
         assert_eq!(offset_of!(FffCreateOptions, exclude_globs), 96);
         assert_eq!(offset_of!(FffCreateOptions, unignore_globs), 104);
+        // ----- v5 -----
+        assert_eq!(offset_of!(FffCreateOptions, extra_ignore), 112);
+        assert_eq!(offset_of!(FffCreateOptions, disable_git), 120);
+        assert_eq!(offset_of!(FffCreateOptions, disable_ignore_files), 121);
     }
 }

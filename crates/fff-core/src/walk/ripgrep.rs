@@ -1,8 +1,9 @@
+use crate::file_picker::FilePickerIgnoreOptions;
 use crate::ignore::{
     CompiledIgnoreOverlay, has_cache_dir_component, is_cache_dir_name, non_git_repo_overrides,
 };
 use crate::types::FileItem;
-use crate::walk::WalkOutput;
+use crate::walk::{WalkIgnoreRules, WalkOutput};
 use crate::watch::is_git_file;
 use ignore::WalkBuilder;
 use std::collections::HashSet;
@@ -13,6 +14,7 @@ use std::sync::{
 };
 
 #[tracing::instrument(skip_all, name = "ripgrep walker", level = "info")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_collect_files(
     base_path: &Path,
     is_git_repo: bool,
@@ -21,6 +23,8 @@ pub(crate) fn walk_collect_files(
     overlay: &CompiledIgnoreOverlay,
     threads: usize,
     synced_files_count: &Arc<AtomicUsize>,
+    _ignore_options: &FilePickerIgnoreOptions,
+    _scope: Option<&Path>,
 ) -> crate::Result<WalkOutput> {
     let mut walk_builder = WalkBuilder::new(base_path);
     walk_builder
@@ -53,6 +57,11 @@ pub(crate) fn walk_collect_files(
             || !entry.file_name().to_str().is_some_and(is_cache_dir_name)
     });
 
+    // Ripgrep lets .ignore re-include hidden entries in a non-Git root.
+    let ignore_rules = (!is_git_repo).then(|| WalkIgnoreRules {
+        inner: walk_builder.build_matchers().pop().expect("one walk root"),
+    });
+
     let pairs = parking_lot::Mutex::new(Vec::<(FileItem, String)>::new());
     let dirs = parking_lot::Mutex::new(Vec::<String>::new());
     collect(
@@ -81,7 +90,7 @@ pub(crate) fn walk_collect_files(
     Ok(WalkOutput {
         pairs,
         dirs,
-        ignore_rules: None,
+        ignore_rules,
     })
 }
 

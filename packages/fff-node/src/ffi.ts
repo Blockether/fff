@@ -88,10 +88,18 @@ const FFF_CREATE_OPTIONS_STRUCT = {
   enable_fs_root_scanning: DataType.U8,
   enable_home_dir_scanning: DataType.U8,
   follow_symlinks: DataType.U8,
+  respect_ignore_files: DataType.U8,
+  custom_ignore_filenames: DataType.String,
+  exclude_globs: DataType.String,
+  unignore_globs: DataType.String,
+  extra_ignore: DataType.String,
+  disable_git: DataType.U8,
+  disable_ignore_files: DataType.U8,
 };
 
 // ALWAYS KEEP IN SYNC WITH fff.h
-const FFF_CREATE_OPTIONS_VERSION = 2;
+const FFF_CREATE_OPTIONS_VERSION = 5;
+const LEGACY_CREATE_OPTIONS_VERSION = 2;
 
 /** Grep mode constants matching the C API (u8). */
 const GREP_MODE_PLAIN = 0;
@@ -370,11 +378,20 @@ export function ffiCreate(
   enableFsRootScanning: boolean,
   enableHomeDirScanning: boolean,
   followSymlinks: boolean,
+  extraIgnore: string,
+  disableGit = false,
+  disableIgnoreFiles = false,
 ): Result<NativeHandle> {
+  if (extraIgnore.includes("\0")) return err("extraIgnore cannot contain NUL bytes");
   loadLibrary();
 
+  const version =
+    extraIgnore || disableGit || disableIgnoreFiles
+      ? FFF_CREATE_OPTIONS_VERSION
+      : LEGACY_CREATE_OPTIONS_VERSION;
+
   const optsValue = {
-    version: FFF_CREATE_OPTIONS_VERSION,
+    version,
     base_path: basePath,
     frecency_db_path: frecencyDbPath,
     history_db_path: historyDbPath,
@@ -390,6 +407,13 @@ export function ffiCreate(
     enable_fs_root_scanning: enableFsRootScanning ? 1 : 0,
     enable_home_dir_scanning: enableHomeDirScanning ? 1 : 0,
     follow_symlinks: followSymlinks ? 1 : 0,
+    respect_ignore_files: 1,
+    custom_ignore_filenames: "",
+    exclude_globs: "",
+    unignore_globs: "",
+    extra_ignore: extraIgnore,
+    disable_git: disableGit ? 1 : 0,
+    disable_ignore_files: disableIgnoreFiles ? 1 : 0,
   };
 
   const rawPtr = load({

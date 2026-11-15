@@ -1,0 +1,188 @@
+name: Publish FFF performance
+
+on:
+  workflow_run:
+    workflows: [FFF performance]
+    types: [completed]
+
+concurrency:
+  group: fff-performance-publish
+  queue: max
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'dmtrKovalenko/fff' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.path == '.github/workflows/performance.yml' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    cache-mode: write
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BENCH_RUN: ${{ github.event.workflow_run.id }}
+      BENCH_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RESULT: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Download the comparison plan
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BENCH_RUN }}
+          pattern: fff-plan
+          path: ${{ runner.temp }}/fff-plan
+      - name: Read the comparison plan
+        id: plan
+        run: |
+          plan="$RUNNER_TEMP/fff-plan/comparison"
+          [[ -f "$plan" ]] || exit 0
+          read -r kind number base <"$plan"
+          [[ "$kind" =~ ^(pr|skip)$ && "$number" =~ ^[0-9]+$ && "$base" =~ ^[0-9a-f]{40}$ ]]
+          printf 'number=%s\nkind=%s\nbase=%s\n' "$number" "$kind" "$base" >>"$GITHUB_OUTPUT"
+      - name: Check out the trusted reporting tools
+        if: steps.plan.outputs.kind == 'pr' && env.RESULT == 'success'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: perf
+          persist-credentials: false
+      - name: Identify the renderer source
+        id: source
+        if: steps.plan.outputs.kind == 'pr' && env.RESULT == 'success'
+        run: echo "tree=$(git rev-parse HEAD:perf/chart)" >>"$GITHUB_OUTPUT"
+      - name: Restore the chart renderer
+        id: renderer
+        if: steps.source.outputs.tree != ''
+        uses: actions/cache/restore@v6
+        with:
+          # Every publisher runs on x64 Ubuntu 24.04, so they can all use the same executable.
+          key: fff-perf-chart-v1-${{ steps.source.outputs.tree }}
+          path: ${{ runner.temp }}/fff-chart
+      - name: Set up Rust for the chart renderer
+        id: rust
+        if: steps.source.outputs.tree != '' && steps.renderer.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
+        with:
+          toolchain: 1.99.1
+          cache: false
+          rustflags: ''
+      - name: Build the chart renderer
+        id: build
+        if: steps.rust.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo build --release --locked --manifest-path perf/chart/Cargo.toml --example chart
+          install -s perf/chart/target/release/examples/chart "$RUNNER_TEMP/fff-chart"
+      - name: Cache the chart renderer
+        if: steps.build.outcome == 'success'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          key: ${{ steps.renderer.outputs.cache-primary-key }}
+          path: ${{ runner.temp }}/fff-chart
+      - name: Download measured timings
+        if: steps.plan.outputs.kind == 'pr' && env.RESULT == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BENCH_RUN }}
+          name: fff-measurements
+          path: ${{ runner.temp }}/fff-measurements
+      - name: Render the chart
+        id: chart
+        if: steps.renderer.outputs.cache-hit == 'true' || steps.build.outcome == 'success'
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ steps.plan.outputs.number }}
+        run: |
+          timings="$RUNNER_TEMP/fff-measurements"
+          "$RUNNER_TEMP/fff-chart" "$timings/base.bench" "$timings/head.bench" "$RUNNER_TEMP/pr-$PR_NUMBER.png"
+      - name: Publish timings
+        if: "!cancelled() && steps.plan.outputs.number != ''"
+        env:
+          PR_NUMBER: ${{ steps.plan.outputs.number }}
+          KIND: ${{ steps.plan.outputs.kind }}
+          BASE_SHA: ${{ steps.plan.outputs.base }}
+          SOURCE_REPO: ${{ github.event.workflow_run.head_repository.id }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CHART: ${{ steps.chart.outcome }}
+        run: |
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" |
+            jq -r --argjson repo "$SOURCE_REPO" --arg branch "$SOURCE_BRANCH" '
+              select(.state == "open" and .head.repo.id == $repo and .head.ref == $branch) | .head.sha
+            ')
+          [[ "$actual" == "$HEAD_SHA" ]] || exit 0
+          report="$RUNNER_TEMP/fff-timings.md"
+          timings="$RUNNER_TEMP/fff-measurements"
+          state=success
+          if [[ "$KIND" == skip ]]; then
+            message='Skipped, no core Rust or dependency changes'
+            echo "$message" >"$report"
+          else
+            code=2
+            if [[ "$RESULT" == success && -f "$timings/base.bench" && -f "$timings/head.bench" ]]; then
+              chart="pr-$PR_NUMBER.png" chart_url=''
+              if [[ "$CHART" == success ]] &&
+                 { gh release view perf-charts >/dev/null 2>&1 ||
+                   gh release create perf-charts --prerelease --latest=false --target main \
+                     --title 'Performance charts' --notes 'Charts shown in the FFF performance PR comments.'; } &&
+                 gh release upload perf-charts "$RUNNER_TEMP/$chart" --clobber; then
+                chart_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/perf-charts/$chart?run=$BENCH_RUN-$BENCH_ATTEMPT"
+              fi
+              code=0
+              bash perf/report.sh "$timings/base.bench" "$timings/head.bench" "$chart_url" >"$report" || code=$?
+            fi
+            case "$code" in
+              0) icon=✅ message='FFF core performance passed' ;;
+              1) state=failure icon=🔴 message='FFF core performance comparison failed' ;;
+              *)
+                state=error message='FFF core measurement could not complete'
+                if [[ "$RESULT" == failure ]]; then
+                  stage=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BENCH_RUN/attempts/$BENCH_ATTEMPT/jobs" \
+                    --jq '.jobs[] | select(.conclusion == "failure") | .name')
+                  case "$stage" in
+                    *'build ('*) message='FFF core benchmark build failed' ;;
+                    *measure*) message='FFF core benchmark measurement failed' ;;
+                  esac
+                fi
+                echo "$message" >"$report"
+                ;;
+            esac
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f context='FFF performance' \
+            -f state="$state" -f description="$message" -f target_url="$RUN_URL" >/dev/null
+          if [[ "$KIND" == pr && "$state" != error ]]; then
+            marker='<!-- fff-core-performance -->'
+            comment="$RUNNER_TEMP/fff-pr-comment.md"
+            {
+              printf '%s\n## 🥼 FFF core performance\n\n%s **%s**\n\n' "$marker" "$icon" "$message"
+              printf 'Base %s, PR %s\n\n' "$BASE_SHA" "$HEAD_SHA"
+              cat "$report"
+              printf '\n🔗 [Workflow run](%s)\n' "$RUN_URL"
+            } >"$comment"
+            comment_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- fff-core-performance -->"))) | .id' |
+              tail -n 1)
+            if [[ -n "$comment_id" ]]; then
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+                --field "body=@$comment" >/dev/null
+            else
+              gh pr comment "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --body-file "$comment"
+            fi
+          fi
+          cat "$report" >>"$GITHUB_STEP_SUMMARY"
+          [[ "$state" == success ]]
