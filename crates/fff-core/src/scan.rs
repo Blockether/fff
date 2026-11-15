@@ -371,11 +371,6 @@ impl ScanJob {
                 &signals.cancelled,
             );
         }
-
-        // TODO Skipped as potentially unsafe - figure this out later
-        // if config.warmup && !signals.cancelled.load(Ordering::Acquire) {
-        //     warmup_mmaps(files, budget, &unsafe_snapshot.base_path, arena);
-        // }
     }
 }
 

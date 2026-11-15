@@ -7,7 +7,7 @@ use crate::index::{
     regex_candidates,
 };
 use crate::simd_string_utils::memmem;
-use crate::types::{ContentCacheBudget, FileItem, MmapSlot};
+use crate::types::{ContentCacheBudget, FileItem};
 use fff_grep::{
     Searcher, SearcherBuilder, Sink, SinkMatch,
     matcher::{Match, Matcher, NoError},
@@ -18,6 +18,32 @@ use smallvec::SmallVec;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tracing::Level;
+
+/// Largest read buffer that a search thread keeps between searches.
+const MAX_RETAINED_READ_BUF: usize = 1024 * 1024;
+
+thread_local! {
+    static READ_BUF: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// The file read buffer of the current search thread. Each parallel split
+/// takes it and gives it back, so a search does not allocate and fault in a
+/// new buffer for each split.
+pub(super) struct ReadBuf(pub(super) Vec<u8>);
+
+impl ReadBuf {
+    pub(super) fn take() -> Self {
+        Self(READ_BUF.take())
+    }
+}
+
+impl Drop for ReadBuf {
+    fn drop(&mut self) {
+        if self.0.capacity() <= MAX_RETAINED_READ_BUF {
+            READ_BUF.set(std::mem::take(&mut self.0));
+        }
+    }
+}
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum NeedleFinder<'a> {
@@ -638,11 +664,8 @@ where
             .par_iter()
             .enumerate()
             .map_init(
-                // tested it out a few times, this is just fine for rayon worker in this specific
-                // case it doesn't reallocate this many times and it is actually faster than using
-                // scoped threads with a predefined local scratch buffers because of spawn cost
-                || (Vec::with_capacity(64 * 1024), MmapSlot::default(), false),
-                |(buf, mmap_slot, aborted), (local_idx, file)| {
+                || (ReadBuf::take(), false),
+                |(buf, aborted), (local_idx, file)| {
                     // check the clock on every 8th file only; `aborted` latches for the
                     // rest of this worker's range. File 0 is never skipped so a page
                     // always consumes at least one file (cursor 0 means "done").
@@ -657,8 +680,7 @@ where
                     }
 
                     let content = file.get_content_for_search(
-                        buf,
-                        mmap_slot,
+                        &mut buf.0,
                         ctx.arena_for_file(file),
                         ctx.base_path,
                         ctx.budget,

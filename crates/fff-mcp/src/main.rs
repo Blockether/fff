@@ -72,10 +72,9 @@ pub(crate) struct Args {
     #[arg(long = "no-update-check")]
     no_update_check: bool,
 
-    /// Disable eager mmap warmup after the initial scan. Grep results will
-    /// still work (files are mmap'd lazily on first access), but the first
-    /// search may be slightly slower. Useful on very large repos where the
-    /// warmup would consume too many kernel resources.
+    /// No effect on grep content: a search reads file content and keeps
+    /// none of it. Also turns off content indexing unless
+    /// `--content-indexing` is set.
     #[arg(long = "no-warmup")]
     no_warmup: bool,
 
@@ -93,10 +92,8 @@ pub(crate) struct Args {
     #[arg(long = "no-watch")]
     no_watch: bool,
 
-    /// Maximum number of files whose content is kept persistently in memory.
-    /// Files beyond this limit are still searchable via temporary mmaps that
-    /// are released after each grep. `0` disables persistent caching entirely.
-    /// Unset: auto-sized from the scanned file count.
+    /// No effect: a search reads file content and keeps none of it. The
+    /// option stays so that existing commands still start.
     /// Also settable via the FFF_MAX_CACHED_FILES environment variable.
     #[arg(long = "max-cached-files", env = "FFF_MAX_CACHED_FILES")]
     max_cached_files: Option<usize>,

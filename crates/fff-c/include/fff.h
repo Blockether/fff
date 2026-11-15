@@ -89,7 +89,7 @@ typedef struct FffCreateOptions {
    */
   const char *history_db_path;
   /**
-   * Pre-populate mmap caches for top-frecency files after the initial scan.
+   * No effect: a search reads file content and keeps none of it.
    */
   bool enable_mmap_cache;
   /**
@@ -114,15 +114,15 @@ typedef struct FffCreateOptions {
    */
   const char *log_level;
   /**
-   * Content cache file-count cap. 0 = auto.
+   * No effect: a search keeps no file content.
    */
   uint64_t cache_budget_max_files;
   /**
-   * Content cache byte cap. 0 = auto.
+   * No effect: a search keeps no file content.
    */
   uint64_t cache_budget_max_bytes;
   /**
-   * Per-file byte cap inside the content cache. 0 = auto.
+   * Largest file that a search reads, in bytes. 0 = auto.
    */
   uint64_t cache_budget_max_file_size;
   /**

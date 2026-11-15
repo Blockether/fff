@@ -579,14 +579,14 @@ impl FileItem {
 /// Options for creating a [`FilePicker`].
 pub struct FilePickerOptions {
     pub base_path: String,
-    /// Pre-populate mmap caches for top-frecency files after the initial scan
+    /// No effect: a search reads file content and keeps none of it.
     pub enable_mmap_cache: bool,
     /// Build content index after the initial scan for faster content-aware filtering
     pub enable_content_indexing: bool,
     /// Mode of the picker impact the way file watcher events are handled and the scoring logic
     pub mode: FFFMode,
-    /// Explicit cache budget. When `None`, the budget is auto-computed from
-    /// the repo size after the initial scan completes.
+    /// Explicit content budget. Only `max_file_size` has an effect: a search
+    /// skips larger files. When `None`, the default applies.
     pub cache_budget: Option<ContentCacheBudget>,
     /// When `false` no background watcher will be created
     pub watch: bool,
@@ -1823,7 +1823,7 @@ impl FilePicker {
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
-        file.update_metadata(&self.cache_budget, modified_time, Some(size));
+        file.update_metadata(modified_time, Some(size));
 
         // Re-classify binary status from current content (chunked, fixed
         // buffer). Already-binary files are left alone.
@@ -1923,7 +1923,6 @@ impl FilePicker {
         }
 
         file.set_deleted(true);
-        file.invalidate_mmap(&self.cache_budget);
         file.git_status = None;
 
         // Only base-region files participate in the bigram overlay
@@ -2010,7 +2009,6 @@ impl FilePicker {
         }
 
         let base_path = self.base_path.clone();
-        let cache_budget = &self.cache_budget;
         let mut path_buf = [0u8; crate::simd_path::PATH_BUF_SIZE];
         let tombstoned = self.sync_data.tombstone_files_with_arena(
             |file, arena| {
@@ -2019,7 +2017,6 @@ impl FilePicker {
                     .any(|prefix| file.relative_path_starts_with(arena, prefix))
             },
             |file, arena| {
-                file.invalidate_mmap(cache_budget);
                 if let Some(callback) = callback.as_mut() {
                     callback(file.write_absolute_path(arena, &base_path, &mut path_buf));
                 }
@@ -2366,34 +2363,6 @@ impl FileSync {
             chunked_paths: Some(Arc::new(chunked_paths)),
             ignore_rules,
         })
-    }
-}
-
-/// Pre-populate mmap caches for cold tail files so the first grep search
-/// doesn't pay the mmap creation + page fault cost.
-#[allow(dead_code)]
-#[tracing::instrument(skip(files), name = "warmup_mmaps", level = Level::DEBUG)]
-pub(crate) fn warmup_mmaps(
-    files: &[FileItem],
-    budget: &ContentCacheBudget,
-    base_path: &Path,
-    arena: ArenaPtr,
-) {
-    // for most of the use cases mmaps limit would be significantly smaller than arepo
-    for file in files.iter() {
-        if file.is_likely_hot()
-            || file.is_binary()
-            || file.size == 0
-            || file.size > budget.max_file_size
-        {
-            continue;
-        }
-
-        let _ = file.get_cached_content(arena, base_path, budget);
-
-        if budget.is_exhausted() {
-            break;
-        }
     }
 }
 

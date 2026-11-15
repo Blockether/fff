@@ -29,7 +29,7 @@ pub struct FffCreateOptions {
     pub frecency_db_path: *const c_char,
     /// Query history LMDB database path. NULL/empty to skip query tracking.
     pub history_db_path: *const c_char,
-    /// Pre-populate mmap caches for top-frecency files after the initial scan.
+    /// No effect: a search reads file content and keeps none of it.
     pub enable_mmap_cache: bool,
     /// Build content index after the initial scan for faster grep.
     pub enable_content_indexing: bool,
@@ -42,11 +42,11 @@ pub struct FffCreateOptions {
     /// Log level: `"trace" | "debug" | "info" | "warn" | "error"`.
     /// NULL/empty defaults to `"info"`. Ignored when `log_file_path` is unset.
     pub log_level: *const c_char,
-    /// Content cache file-count cap. 0 = auto.
+    /// No effect: a search keeps no file content.
     pub cache_budget_max_files: u64,
-    /// Content cache byte cap. 0 = auto.
+    /// No effect: a search keeps no file content.
     pub cache_budget_max_bytes: u64,
-    /// Per-file byte cap inside the content cache. 0 = auto.
+    /// Largest file that a search reads, in bytes. 0 = auto.
     pub cache_budget_max_file_size: u64,
     /// Allow indexing the filesystem root (`/`). Off by default: root is rarely
     /// intended and floods the watcher with churn.

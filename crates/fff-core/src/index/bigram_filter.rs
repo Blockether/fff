@@ -1064,10 +1064,7 @@ thread_local! {
     static READ_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Reads bigram chunk, we *SHOULD NOT* use mmap cache here because bigram is built off-lock
-/// if the watcher thread tries to invalidate mmap during the borrow from it - UAB or segfaut
-///
-/// mmap should only be used by the locked version of grep which absolutely minimizes any riscs
+/// Reads a bigram chunk of the file into the per-thread buffer.
 #[inline]
 fn read_bigram_chunk<'a>(
     file: &FileItem,
@@ -1102,11 +1099,8 @@ pub(crate) fn build_bigram_index(
     #[cfg(not(unix))]
     let base_fd: i32 = -1;
 
-    // Always reads each file into the thread-local READ_BUF — never aliases the
-    // persistent mmap cache. See `read_bigram_chunk` for the rationale: this
-    // pass runs detached on the content pool without holding the picker
-    // read lock, so a watcher event mutating a `FileItem` would race any
-    // borrow we took from a cached `Mmap`.
+    // Reads each file into the thread-local READ_BUF: this pass runs detached
+    // on the content pool without holding the picker read lock.
     crate::parallelism::CONTENT_THREAD_POOL.install(|| {
         files
             .par_chunks(BIGRAM_CHUNK_FILES)
