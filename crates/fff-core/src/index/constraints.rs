@@ -278,6 +278,19 @@ impl<'q, 'c> ConstraintPlan<'q, 'c> {
         overflow_arena: ArenaPtr,
         scratch: &mut ConstraintsBuffers,
     ) -> bool {
+        self.matches_with_path_offset(item, index, base_arena, overflow_arena, scratch, 0)
+    }
+
+    #[inline]
+    pub(crate) fn matches_with_path_offset<T: Constrainable>(
+        &self,
+        item: &T,
+        index: usize,
+        base_arena: ArenaPtr,
+        overflow_arena: ArenaPtr,
+        scratch: &mut ConstraintsBuffers,
+        path_offset: usize,
+    ) -> bool {
         let arena = if item.is_overflow() {
             overflow_arena
         } else {
@@ -299,6 +312,7 @@ impl<'q, 'c> ConstraintPlan<'q, 'c> {
                 false,
                 arena,
                 scratch,
+                path_offset,
             )
         })
     }
@@ -330,6 +344,7 @@ fn evaluate<T: Constrainable>(
     negate: bool,
     arena: ArenaPtr,
     scratch: &mut ConstraintsBuffers,
+    path_offset: usize,
 ) -> bool {
     let raw = match constraint {
         Constraint::Glob(_) => {
@@ -344,7 +359,7 @@ fn evaluate<T: Constrainable>(
                     patterns
                         .get(*glob_idx)
                         .and_then(|p| p.as_ref())
-                        .map(|p| compiled_matches(p, &scratch.path))
+                        .map(|p| compiled_matches(p, &scratch.path[path_offset..]))
                         .unwrap_or(false)
                 }
             };
@@ -356,20 +371,31 @@ fn evaluate<T: Constrainable>(
         Constraint::Extension(ext) => item.has_extension(arena, ext, &mut scratch.fname),
         Constraint::PathSegment(segment) => {
             item.write_relative_path(arena, &mut scratch.path);
-            path_contains_segment(&scratch.path, segment)
+            path_contains_segment(&scratch.path[path_offset..], segment)
         }
         Constraint::FilePath(suffix) => {
             item.write_relative_path(arena, &mut scratch.path);
-            path_ends_with_suffix(&scratch.path, suffix)
+            path_ends_with_suffix(&scratch.path[path_offset..], suffix)
         }
         Constraint::Text(text) => {
             // Only meaningful under negation (used as exclude filter).
             item.write_relative_path(arena, &mut scratch.path);
-            find_case_insensitive_short(scratch.path.as_bytes(), text.as_bytes()).is_some()
+            find_case_insensitive_short(&scratch.path.as_bytes()[path_offset..], text.as_bytes())
+                .is_some()
         }
         Constraint::GitStatus(filter) => matches_git_status(item.git_status(), filter),
         Constraint::Not(inner) => {
-            return evaluate(item, index, inner, glob, glob_idx, !negate, arena, scratch);
+            return evaluate(
+                item,
+                index,
+                inner,
+                glob,
+                glob_idx,
+                !negate,
+                arena,
+                scratch,
+                path_offset,
+            );
         }
         // Pass-throughs — handled at higher levels.
         Constraint::Parts(_) | Constraint::Exclude(_) | Constraint::FileType(_) => true,

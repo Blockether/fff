@@ -231,6 +231,7 @@ pub(crate) fn grep_search<'a>(
     base_path: &Path,
     arena: crate::simd_path::ArenaPtr,
     overflow_arena: crate::simd_path::ArenaPtr,
+    directory_prefix: &str,
 ) -> GrepResult<'a> {
     let result = grep_search_parsed(
         files,
@@ -244,6 +245,7 @@ pub(crate) fn grep_search<'a>(
         base_path,
         arena,
         overflow_arena,
+        directory_prefix,
     );
 
     // Constraint parsing can swallow tokens the user meant literally (e.g. `!=`
@@ -280,6 +282,7 @@ pub(crate) fn grep_search<'a>(
             base_path,
             arena,
             overflow_arena,
+            directory_prefix,
         );
         if !unfiltered.matches.is_empty() || unfiltered.next_file_offset != 0 {
             return result;
@@ -320,6 +323,7 @@ pub(crate) fn grep_search<'a>(
         base_path,
         arena,
         overflow_arena,
+        directory_prefix,
     );
 
     if fallback.matches.is_empty() {
@@ -343,6 +347,7 @@ fn grep_search_parsed<'a>(
     base_path: &Path,
     arena: crate::simd_path::ArenaPtr,
     overflow_arena: crate::simd_path::ArenaPtr,
+    directory_prefix: &str,
 ) -> GrepResult<'a> {
     let constraints_from_query = &query.constraints[..];
 
@@ -370,6 +375,7 @@ fn grep_search_parsed<'a>(
                 options,
                 arena,
                 overflow_arena,
+                directory_prefix,
             );
 
             if files_to_search.is_empty() {
@@ -437,6 +443,7 @@ fn grep_search_parsed<'a>(
         options,
         arena,
         overflow_arena,
+        directory_prefix,
     );
 
     if files_to_search.is_empty() {

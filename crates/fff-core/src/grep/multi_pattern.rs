@@ -134,6 +134,7 @@ pub(crate) fn multi_grep_search<'a>(
         options,
         arena,
         overflow_arena,
+        "",
     );
 
     if files_to_search.is_empty() {

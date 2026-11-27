@@ -632,6 +632,23 @@ struct FffResult *fff_search(void *fff_handle,
                              uint32_t min_combo_count);
 
 /**
+ * [`fff_search`] restricted to a literal directory relative to the index base.
+ * A null or empty `directory` searches the whole index. Results keep index-relative paths.
+ *
+ * # Safety
+ * Same as [`fff_search`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+ */
+struct FffResult *fff_search_in_directory(void *fff_handle,
+                                          const char *query,
+                                          const char *current_file,
+                                          uint32_t max_threads,
+                                          uint32_t page_index,
+                                          uint32_t page_size,
+                                          int32_t combo_boost_multiplier,
+                                          uint32_t min_combo_count,
+                                          const char *directory);
+
+/**
  * Glob-only search: filter indexed files by a single glob pattern (passed
  * through verbatim, no query parsing), rank by frecency, and paginate.
  *
@@ -650,6 +667,21 @@ struct FffResult *fff_glob(void *fff_handle,
                            uint32_t page_size);
 
 /**
+ * [`fff_glob`] restricted to a literal directory relative to the index base.
+ * A null or empty `directory` searches the whole index. Results keep index-relative paths.
+ *
+ * # Safety
+ * Same as [`fff_glob`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+ */
+struct FffResult *fff_glob_in_directory(void *fff_handle,
+                                        const char *pattern,
+                                        const char *current_file,
+                                        uint32_t max_threads,
+                                        uint32_t page_index,
+                                        uint32_t page_size,
+                                        const char *directory);
+
+/**
  * Perform fuzzy search on indexed directories.
  *
  * `current_file` is used for distance scoring (NULL/empty to skip).
@@ -665,6 +697,31 @@ struct FffResult *fff_search_directories(void *fff_handle,
                                          uint32_t max_threads,
                                          uint32_t page_index,
                                          uint32_t page_size);
+
+/**
+ * [`fff_search_directories`] restricted to a literal directory relative to the index base.
+ * A null or empty `directory` searches the whole index. Results keep index-relative paths.
+ *
+ * # Safety
+ * Same as [`fff_search_directories`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+ */
+struct FffResult *fff_search_directories_in_directory(void *fff_handle,
+                                                      const char *query,
+                                                      const char *current_file,
+                                                      uint32_t max_threads,
+                                                      uint32_t page_index,
+                                                      uint32_t page_size,
+                                                      const char *directory);
+
+/**
+ * Report whether the index contains a live entry for a literal relative directory.
+ * Returns 1 for present, 0 otherwise.
+ *
+ * # Safety
+ * `fff_handle` must be a valid instance pointer. `directory` must point to a
+ * null-terminated UTF-8 string.
+ */
+uint32_t fff_contains_directory(void *fff_handle, const char *directory);
 
 /**
  * List ONE directory, without indexing anything.
@@ -772,6 +829,28 @@ struct FffResult *fff_live_grep_ex(void *fff_handle,
                                    uint32_t before_context,
                                    uint32_t after_context,
                                    uint8_t classify_definitions);
+
+/**
+ * [`fff_live_grep_ex`] restricted to a literal directory relative to the index base.
+ * A null or empty `directory` searches the whole index. Results keep index-relative paths.
+ *
+ * # Safety
+ * Same as [`fff_live_grep_ex`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+ */
+struct FffResult *fff_live_grep_in_directory(void *fff_handle,
+                                             const char *query,
+                                             uint8_t mode,
+                                             uint64_t max_file_size,
+                                             uint32_t max_matches_per_file,
+                                             bool smart_case,
+                                             uint32_t file_offset,
+                                             uint32_t page_limit,
+                                             uint64_t time_budget_ms,
+                                             bool enforce_time_budget,
+                                             uint32_t before_context,
+                                             uint32_t after_context,
+                                             uint8_t classify_definitions,
+                                             const char *directory);
 
 /**
  * Multi-pattern OR search (SIMD Aho-Corasick): lines matching ANY pattern.

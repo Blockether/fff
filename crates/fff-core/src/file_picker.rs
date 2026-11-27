@@ -43,7 +43,7 @@ use crate::scm::{ScmBackend, ScmStatusWorker};
 use crate::scm::{ScmStatusCache, StatusMap};
 use crate::score::{fuzzy_match_and_score_files, fuzzy_match_byte_offsets_for_page};
 use crate::shared::{SharedFilePicker, SharedFrecency};
-use crate::simd_path::ArenaPtr;
+use crate::simd_path::{ArenaPtr, ChunkedPathStoreBuilder};
 use crate::stable_vec::StableVec;
 use crate::types::{
     ContentCacheBudget, DirItem, DirSearchResult, FileItem, MixedItemRef, MixedSearchResult,
@@ -65,6 +65,24 @@ use std::time::SystemTime;
 use tracing::{Level, debug, error, info, warn};
 
 use crate::parallelism::{SEARCH_THREAD_POOL, indexing_pool};
+
+pub(crate) fn directory_prefix(directory: &str) -> String {
+    if directory.is_empty() {
+        return String::new();
+    }
+    #[cfg(windows)]
+    let directory = directory.replace('\\', "/");
+    if directory.ends_with('/') {
+        directory.to_owned()
+    } else {
+        format!("{directory}/")
+    }
+}
+
+// `item` is borrowed from `items` by the scorer.
+fn scoped_index<T>(item: &T, items: &[T]) -> usize {
+    (std::ptr::from_ref(item).addr() - items.as_ptr().addr()) / std::mem::size_of::<T>()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FFFMode {
@@ -907,6 +925,16 @@ impl FilePicker {
         &self.sync_data.dirs
     }
 
+    /// Whether the index contains this directory. Paths are relative to its base.
+    pub fn contains_directory(&self, directory: &str) -> bool {
+        let prefix = directory_prefix(directory);
+        prefix.is_empty()
+            || self
+                .sync_data
+                .find_dir_index(&prefix)
+                .is_some_and(|index| !self.get_dirs()[index].is_deleted())
+    }
+
     /// Actual heap bytes used: (chunked_path_store, 0, 0).
     /// The second element is 0 because leaked overflow stores aren't tracked.
     pub fn arena_bytes(&self) -> (usize, usize, usize) {
@@ -1281,12 +1309,24 @@ impl FilePicker {
     /// The query should be parsed using [`crate::FFFQuery`] before calling
     /// this function. If a [`crate::QueryTracker`] is provided, the search will
     /// automatically look up the last selected file for this query and boost it
-    #[tracing::instrument(skip_all, name = "Fuzzy file search", fields(query = query.raw_query))]
     pub fn fuzzy_search<'q>(
         &self,
         query: &'q FFFQuery<'q>,
         query_tracker: Option<&QueryTracker>,
         options: FuzzySearchOptions<'q>,
+    ) -> SearchResult<'_> {
+        self.fuzzy_search_in_directory(query, query_tracker, options, "")
+    }
+
+    /// Search a literal directory relative to the index base. Match paths relative
+    /// to that directory and return items from the original index.
+    #[tracing::instrument(skip_all, name = "Fuzzy file search", fields(query = query.raw_query))]
+    pub fn fuzzy_search_in_directory<'q>(
+        &self,
+        query: &'q FFFQuery<'q>,
+        query_tracker: Option<&QueryTracker>,
+        options: FuzzySearchOptions<'q>,
+        directory: &str,
     ) -> SearchResult<'_> {
         let files = self.get_files();
         let max_threads = if options.max_threads == 0 {
@@ -1305,7 +1345,6 @@ impl FilePicker {
             "Fuzzy search",
         );
 
-        let total_files = self.live_file_count();
         let location = query.location;
 
         // Get effective query for max_typos calculation (without location suffix)
@@ -1349,15 +1388,63 @@ impl FilePicker {
         let base_arena = self.sync_data.arena_base_ptr();
         let overflow_arena = self.sync_data.arena_overflow_ptr();
 
-        let (items, scores, total_matched) = fuzzy_match_and_score_files(
-            files,
-            &context,
-            self.sync_data.base_count,
-            base_arena,
-            overflow_arena,
-        );
-        let match_byte_offsets =
-            fuzzy_match_byte_offsets_for_page(query, &items, max_typos, base_arena, overflow_arena);
+        let prefix = directory_prefix(directory);
+        let (items, scores, total_matched, total_files, match_byte_offsets) =
+            if prefix.is_empty() {
+                let (items, scores, total) = fuzzy_match_and_score_files(
+                    files,
+                    &context,
+                    self.sync_data.base_count,
+                    base_arena,
+                    overflow_arena,
+                );
+                let offsets = fuzzy_match_byte_offsets_for_page(
+                    query,
+                    &items,
+                    max_typos,
+                    base_arena,
+                    overflow_arena,
+                );
+                (items, scores, total, self.live_file_count(), offsets)
+            } else {
+                // Project just the selected paths into a temporary arena. The same matcher
+                // sees the paths it would see in a picker opened at this directory.
+                let mut arena = ChunkedPathStoreBuilder::new(0);
+                let mut originals = Vec::new();
+                let mut scoped = Vec::new();
+                let mut buf = [0; PATH_BUF_SIZE];
+                for file in files {
+                    let original_arena = self.arena_for(file);
+                    if file.is_deleted() || !file.path.starts_with(original_arena, &prefix) {
+                        continue;
+                    }
+                    let relative = &file.path.read_to_buf(original_arena, &mut buf)[prefix.len()..];
+                    let mut projected = file.clone();
+                    projected.set_path(arena.add_file_immediate(
+                        relative,
+                        file.path.filename_offset - prefix.len() as u16,
+                    ));
+                    originals.push(file);
+                    scoped.push(projected);
+                }
+                let arena = arena.as_arena_ptr();
+                let base_count = scoped.partition_point(|file| !file.is_overflow());
+                let (items, scores, total) =
+                    fuzzy_match_and_score_files(&scoped, &context, base_count, arena, arena);
+                let mut offsets =
+                    fuzzy_match_byte_offsets_for_page(query, &items, max_typos, arena, arena);
+                for ranges in &mut offsets {
+                    for (start, end) in ranges {
+                        *start += prefix.len() as u32;
+                        *end += prefix.len() as u32;
+                    }
+                }
+                let originals = items
+                    .into_iter()
+                    .map(|item| originals[scoped_index(item, &scoped)])
+                    .collect();
+                (originals, scores, total, scoped.len(), offsets)
+            };
 
         info!(
             ?query,
@@ -1386,6 +1473,16 @@ impl FilePicker {
         query: &'q FFFQuery<'q>,
         options: FuzzySearchOptions<'q>,
     ) -> DirSearchResult<'_> {
+        self.fuzzy_search_directories_in_directory(query, options, "")
+    }
+
+    /// Search descendants of a literal directory relative to the index base.
+    pub fn fuzzy_search_directories_in_directory<'q>(
+        &self,
+        query: &'q FFFQuery<'q>,
+        options: FuzzySearchOptions<'q>,
+        directory: &str,
+    ) -> DirSearchResult<'_> {
         let dirs = self.get_dirs();
         let max_threads = if options.max_threads == 0 {
             std::thread::available_parallelism()
@@ -1394,8 +1491,6 @@ impl FilePicker {
         } else {
             options.max_threads
         };
-
-        let total_dirs = self.sync_data.live_dirs_count;
 
         let effective_query = match &query.fuzzy_query {
             fff_query_parser::FuzzyQuery::Text(t) => *t,
@@ -1421,8 +1516,46 @@ impl FilePicker {
         let overflow_arena = self.sync_data.arena_overflow_ptr();
         let time = std::time::Instant::now();
 
-        let (items, scores, total_matched) =
-            crate::score::fuzzy_match_and_score_dirs(dirs, &context, arena, overflow_arena);
+        let prefix = directory_prefix(directory);
+        let (items, scores, total_matched, total_dirs) = if prefix.is_empty() {
+            let (items, scores, total) =
+                crate::score::fuzzy_match_and_score_dirs(dirs, &context, arena, overflow_arena);
+            (items, scores, total, self.sync_data.live_dirs_count)
+        } else {
+            let mut paths = ChunkedPathStoreBuilder::new(0);
+            let mut originals = Vec::new();
+            let mut scoped = Vec::new();
+            let mut buf = [0; PATH_BUF_SIZE];
+            for dir in dirs {
+                let original_arena = if dir.is_overflow() {
+                    overflow_arena
+                } else {
+                    arena
+                };
+                if dir.is_deleted()
+                    || dir.path.byte_len as usize <= prefix.len()
+                    || !dir.path.starts_with(original_arena, &prefix)
+                {
+                    continue;
+                }
+                let relative = &dir.read_relative_path(original_arena, &mut buf)[prefix.len()..];
+                let projected = DirItem::new(
+                    paths.add_dir_immediate(relative),
+                    dir.last_segment_offset() - prefix.len() as u16,
+                );
+                projected.update_frecency_if_larger(dir.max_access_frecency());
+                originals.push(dir);
+                scoped.push(projected);
+            }
+            let arena = paths.as_arena_ptr();
+            let (items, scores, total) =
+                crate::score::fuzzy_match_and_score_dirs(&scoped, &context, arena, arena);
+            let originals = items
+                .into_iter()
+                .map(|item| originals[scoped_index(item, &scoped)])
+                .collect();
+            (originals, scores, total, scoped.len())
+        };
 
         info!(
             ?query,
@@ -1578,6 +1711,16 @@ impl FilePicker {
         pattern: &'p str,
         options: FuzzySearchOptions<'p>,
     ) -> SearchResult<'p> {
+        self.glob_in_directory(pattern, options, "")
+    }
+
+    /// Apply a glob to the paths within a literal directory relative to the base.
+    pub fn glob_in_directory<'p>(
+        &'p self,
+        pattern: &'p str,
+        options: FuzzySearchOptions<'p>,
+        directory: &str,
+    ) -> SearchResult<'p> {
         let query = FFFQuery {
             raw_query: pattern,
             constraints: vec![fff_query_parser::Constraint::Glob(pattern)],
@@ -1589,7 +1732,7 @@ impl FilePicker {
         // `fuzzy_query` is `Empty`, then runs the same `sort_and_paginate`
         // path. Reusing it keeps the ranking guarantees identical without
         // exposing the private scoring helpers.
-        self.fuzzy_search(&query, None, options)
+        self.fuzzy_search_in_directory(&query, None, options, directory)
     }
 
     /// Perform a live grep search across indexed files.
@@ -1597,6 +1740,17 @@ impl FilePicker {
     /// If `options.abort_signal` is set it overrides the picker's internal
     /// cancellation flag, giving the caller full control over when to stop.
     pub fn grep(&self, query: &FFFQuery<'_>, options: &GrepSearchOptions) -> GrepResult<'_> {
+        self.grep_in_directory(query, options, "")
+    }
+
+    /// Grep a literal directory relative to the index base without changing the query.
+    pub fn grep_in_directory(
+        &self,
+        query: &FFFQuery<'_>,
+        options: &GrepSearchOptions,
+        directory: &str,
+    ) -> GrepResult<'_> {
+        let prefix = directory_prefix(directory);
         let overlay_guard = self.sync_data.bigram_overlay.as_ref().map(|o| o.read());
         let arena = self.arena_base_ptr();
         let overflow_arena = self.sync_data.arena_overflow_ptr();
@@ -1618,6 +1772,7 @@ impl FilePicker {
                 &self.base_path,
                 arena,
                 overflow_arena,
+                &prefix,
             )
         })
     }

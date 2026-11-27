@@ -394,6 +394,46 @@ pub unsafe extern "C" fn fff_search(
     combo_boost_multiplier: i32,
     min_combo_count: u32,
 ) -> *mut FffResult {
+    unsafe {
+        fff_search_in_directory(
+            fff_handle,
+            query,
+            current_file,
+            max_threads,
+            page_index,
+            page_size,
+            combo_boost_multiplier,
+            min_combo_count,
+            std::ptr::null(),
+        )
+    }
+}
+
+/// [`fff_search`] restricted to a literal directory relative to the index base.
+/// A null or empty `directory` searches the whole index. Results keep index-relative paths.
+///
+/// # Safety
+/// Same as [`fff_search`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_search_in_directory(
+    fff_handle: *mut c_void,
+    query: *const c_char,
+    current_file: *const c_char,
+    max_threads: u32,
+    page_index: u32,
+    page_size: u32,
+    combo_boost_multiplier: i32,
+    min_combo_count: u32,
+    directory: *const c_char,
+) -> *mut FffResult {
+    let scope = if directory.is_null() {
+        ""
+    } else {
+        match unsafe { cstr_to_str(directory) } {
+            Some(scope) => scope,
+            None => return FffResult::err("Directory is invalid UTF-8"),
+        }
+    };
     let inst = match unsafe { instance_ref(fff_handle) } {
         Ok(i) => i,
         Err(e) => return e,
@@ -431,7 +471,7 @@ pub unsafe extern "C" fn fff_search(
     let parser = QueryParser::default();
     let parsed = parser.parse(query_str);
 
-    let results = picker.fuzzy_search(
+    let results = picker.fuzzy_search_in_directory(
         &parsed,
         query_tracker_ref,
         FuzzySearchOptions {
@@ -445,6 +485,7 @@ pub unsafe extern "C" fn fff_search(
                 limit: page_size,
             },
         },
+        scope,
     );
 
     let search_result = FffSearchResult::from_core(&results, picker);
@@ -469,6 +510,42 @@ pub unsafe extern "C" fn fff_glob(
     page_index: u32,
     page_size: u32,
 ) -> *mut FffResult {
+    unsafe {
+        fff_glob_in_directory(
+            fff_handle,
+            pattern,
+            current_file,
+            max_threads,
+            page_index,
+            page_size,
+            std::ptr::null(),
+        )
+    }
+}
+
+/// [`fff_glob`] restricted to a literal directory relative to the index base.
+/// A null or empty `directory` searches the whole index. Results keep index-relative paths.
+///
+/// # Safety
+/// Same as [`fff_glob`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_glob_in_directory(
+    fff_handle: *mut c_void,
+    pattern: *const c_char,
+    current_file: *const c_char,
+    max_threads: u32,
+    page_index: u32,
+    page_size: u32,
+    directory: *const c_char,
+) -> *mut FffResult {
+    let scope = if directory.is_null() {
+        ""
+    } else {
+        match unsafe { cstr_to_str(directory) } {
+            Some(scope) => scope,
+            None => return FffResult::err("Directory is invalid UTF-8"),
+        }
+    };
     let inst = match unsafe { instance_ref(fff_handle) } {
         Ok(i) => i,
         Err(e) => return e,
@@ -494,7 +571,7 @@ pub unsafe extern "C" fn fff_glob(
         }
     };
 
-    let results = picker.glob(
+    let results = picker.glob_in_directory(
         pattern_str,
         FuzzySearchOptions {
             max_threads: max_threads as usize,
@@ -507,6 +584,7 @@ pub unsafe extern "C" fn fff_glob(
                 limit: page_size,
             },
         },
+        scope,
     );
 
     let search_result = FffSearchResult::from_core(&results, picker);
@@ -530,6 +608,42 @@ pub unsafe extern "C" fn fff_search_directories(
     page_index: u32,
     page_size: u32,
 ) -> *mut FffResult {
+    unsafe {
+        fff_search_directories_in_directory(
+            fff_handle,
+            query,
+            current_file,
+            max_threads,
+            page_index,
+            page_size,
+            std::ptr::null(),
+        )
+    }
+}
+
+/// [`fff_search_directories`] restricted to a literal directory relative to the index base.
+/// A null or empty `directory` searches the whole index. Results keep index-relative paths.
+///
+/// # Safety
+/// Same as [`fff_search_directories`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_search_directories_in_directory(
+    fff_handle: *mut c_void,
+    query: *const c_char,
+    current_file: *const c_char,
+    max_threads: u32,
+    page_index: u32,
+    page_size: u32,
+    directory: *const c_char,
+) -> *mut FffResult {
+    let scope = if directory.is_null() {
+        ""
+    } else {
+        match unsafe { cstr_to_str(directory) } {
+            Some(scope) => scope,
+            None => return FffResult::err("Directory is invalid UTF-8"),
+        }
+    };
     let inst = match unsafe { instance_ref(fff_handle) } {
         Ok(i) => i,
         Err(e) => return e,
@@ -558,7 +672,7 @@ pub unsafe extern "C" fn fff_search_directories(
     let parser = QueryParser::new(fff_query_parser::DirSearchConfig);
     let parsed = parser.parse(query_str);
 
-    let results = picker.fuzzy_search_directories(
+    let results = picker.fuzzy_search_directories_in_directory(
         &parsed,
         FuzzySearchOptions {
             max_threads: max_threads as usize,
@@ -571,10 +685,38 @@ pub unsafe extern "C" fn fff_search_directories(
                 limit: page_size,
             },
         },
+        scope,
     );
 
     let dir_result = FffDirSearchResult::from_core(&results, picker);
     FffResult::ok_handle(dir_result as *mut c_void)
+}
+
+/// Report whether the index contains a live entry for a literal relative directory.
+/// Returns 1 for present, 0 otherwise.
+///
+/// # Safety
+/// `fff_handle` must be a valid instance pointer. `directory` must point to a
+/// null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_contains_directory(
+    fff_handle: *mut c_void,
+    directory: *const c_char,
+) -> u32 {
+    let Ok(inst) = (unsafe { instance_ref(fff_handle) }) else {
+        return 0;
+    };
+    let Some(scope) = (unsafe { cstr_to_str(directory) }) else {
+        return 0;
+    };
+    let Ok(picker) = inst.picker.read() else {
+        return 0;
+    };
+    u32::from(
+        picker
+            .as_ref()
+            .is_some_and(|picker| picker.contains_directory(scope)),
+    )
 }
 
 /// List ONE directory, without indexing anything.
@@ -795,6 +937,56 @@ pub unsafe extern "C" fn fff_live_grep_ex(
     after_context: u32,
     classify_definitions: u8,
 ) -> *mut FffResult {
+    unsafe {
+        fff_live_grep_in_directory(
+            fff_handle,
+            query,
+            mode,
+            max_file_size,
+            max_matches_per_file,
+            smart_case,
+            file_offset,
+            page_limit,
+            time_budget_ms,
+            enforce_time_budget,
+            before_context,
+            after_context,
+            classify_definitions,
+            std::ptr::null(),
+        )
+    }
+}
+
+/// [`fff_live_grep_ex`] restricted to a literal directory relative to the index base.
+/// A null or empty `directory` searches the whole index. Results keep index-relative paths.
+///
+/// # Safety
+/// Same as [`fff_live_grep_ex`]. A non-null `directory` must point to a null-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_live_grep_in_directory(
+    fff_handle: *mut c_void,
+    query: *const c_char,
+    mode: u8,
+    max_file_size: u64,
+    max_matches_per_file: u32,
+    smart_case: bool,
+    file_offset: u32,
+    page_limit: u32,
+    time_budget_ms: u64,
+    enforce_time_budget: bool,
+    before_context: u32,
+    after_context: u32,
+    classify_definitions: u8,
+    directory: *const c_char,
+) -> *mut FffResult {
+    let scope = if directory.is_null() {
+        ""
+    } else {
+        match unsafe { cstr_to_str(directory) } {
+            Some(scope) => scope,
+            None => return FffResult::err("Directory is invalid UTF-8"),
+        }
+    };
     let Some(classify_definitions) = fff::DefinitionMode::from_u8(classify_definitions) else {
         return FffResult::err(
             "classify_definitions must be 0 (off), 1 (classify), 2 (definition_only), or 3 (usage_only)",
@@ -846,7 +1038,7 @@ pub unsafe extern "C" fn fff_live_grep_ex(
         abort_signal: None,
     };
 
-    let result = picker.grep(&parsed, &options);
+    let result = picker.grep_in_directory(&parsed, &options, scope);
     let grep_result = FffGrepResult::from_core(&result, picker);
     FffResult::ok_handle(grep_result as *mut c_void)
 }

@@ -77,6 +77,7 @@ pub(super) fn prefilter_with_filepath_retry<'a>(
     options: &GrepSearchOptions,
     arena: crate::simd_path::ArenaPtr,
     overflow_arena: crate::simd_path::ArenaPtr,
+    directory_prefix: &str,
 ) -> (RankedFiles<'a>, usize) {
     let (files_to_search, filtered_file_count) = prefilter_files(
         files,
@@ -86,6 +87,7 @@ pub(super) fn prefilter_with_filepath_retry<'a>(
         options,
         arena,
         overflow_arena,
+        directory_prefix,
     );
 
     if !files_to_search.is_empty()
@@ -106,12 +108,14 @@ pub(super) fn prefilter_with_filepath_retry<'a>(
         options,
         arena,
         overflow_arena,
+        directory_prefix,
     )
 }
 
 /// Single pass prefilter that doesn't involve file reading
 /// allocates only amount of memory required for storing references of the FileItems have to be
 /// opened for grepping unaviodably, in the worst case allocates N * <word> memory if no prefilter needed
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prefilter_files<'a>(
     files: &'a [FileItem],
     constraints: &[Constraint<'_>],
@@ -120,6 +124,7 @@ pub(super) fn prefilter_files<'a>(
     options: &GrepSearchOptions,
     arena: crate::simd_path::ArenaPtr,
     overflow_arena: crate::simd_path::ArenaPtr,
+    directory_prefix: &str,
 ) -> (RankedFiles<'a>, usize) {
     let max_file_size = options.max_file_size;
     let definition_only = options.classify_definitions == super::DefinitionMode::DefinitionOnly;
@@ -128,7 +133,8 @@ pub(super) fn prefilter_files<'a>(
         None
     } else {
         // Sparse content candidates need only inline glob checks, not a full-index path pass.
-        let sparse = candidate_count.is_some_and(|count| count < files.len() / 2);
+        let sparse = !directory_prefix.is_empty()
+            || candidate_count.is_some_and(|count| count < files.len() / 2);
         Some(ConstraintPlan::build_with_prefilter(
             constraints,
             files,
@@ -148,6 +154,15 @@ pub(super) fn prefilter_files<'a>(
             && file.size <= max
             && (!definition_only || file.supports_definitions())
     }
+
+    let belongs_to_scope = |file: &FileItem| {
+        let arena = if file.is_overflow() {
+            overflow_arena
+        } else {
+            arena
+        };
+        directory_prefix.is_empty() || file.path.starts_with(arena, directory_prefix)
+    };
 
     // squeeze as much prefilters into a single loop as possible
     let prefiltered: Vec<&FileItem> = match bigram_candidates {
@@ -172,11 +187,20 @@ pub(super) fn prefilter_files<'a>(
                         bits &= bits - 1;
 
                         let f = unsafe { indexed.get_unchecked(file_idx) };
-                        if !basic_prefilter(f, max_file_size, definition_only) {
+                        if !basic_prefilter(f, max_file_size, definition_only)
+                            || !belongs_to_scope(f)
+                        {
                             continue;
                         }
                         if let Some(plan) = plan.as_ref()
-                            && !plan.matches(f, file_idx, arena, overflow_arena, &mut scratch)
+                            && !plan.matches_with_path_offset(
+                                f,
+                                file_idx,
+                                arena,
+                                overflow_arena,
+                                &mut scratch,
+                                directory_prefix.len(),
+                            )
                         {
                             continue;
                         }
@@ -204,11 +228,18 @@ pub(super) fn prefilter_files<'a>(
 
             // Sequential processing for non-bigrammable files: they are always in the end
             for (offset, f) in tail.iter().enumerate() {
-                if !basic_prefilter(f, max_file_size, definition_only) {
+                if !basic_prefilter(f, max_file_size, definition_only) || !belongs_to_scope(f) {
                     continue;
                 }
                 if let Some(ref p) = plan
-                    && !p.matches(f, boundary + offset, arena, overflow_arena, &mut scratch)
+                    && !p.matches_with_path_offset(
+                        f,
+                        boundary + offset,
+                        arena,
+                        overflow_arena,
+                        &mut scratch,
+                        directory_prefix.len(),
+                    )
                 {
                     continue;
                 }
@@ -223,11 +254,18 @@ pub(super) fn prefilter_files<'a>(
         None => {
             let mut out: Vec<&FileItem> = Vec::new();
             for (idx, f) in files.iter().enumerate() {
-                if !basic_prefilter(f, max_file_size, definition_only) {
+                if !basic_prefilter(f, max_file_size, definition_only) || !belongs_to_scope(f) {
                     continue;
                 }
                 if let Some(ref p) = plan
-                    && !p.matches(f, idx, arena, overflow_arena, &mut scratch)
+                    && !p.matches_with_path_offset(
+                        f,
+                        idx,
+                        arena,
+                        overflow_arena,
+                        &mut scratch,
+                        directory_prefix.len(),
+                    )
                 {
                     continue;
                 }
@@ -359,6 +397,7 @@ mod tests {
                         &options,
                         ArenaPtr::null(),
                         ArenaPtr::null(),
+                        "",
                     );
                     assert_eq!(count, expected.len());
                     assert_eq!(

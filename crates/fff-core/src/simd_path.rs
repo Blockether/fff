@@ -106,12 +106,17 @@ impl ChunkedString {
 
     #[inline]
     pub(crate) fn equals(&self, arena: ArenaPtr, other: &str) -> bool {
-        if other.len() != self.byte_len as usize {
+        self.byte_len as usize == other.len() && self.starts_with(arena, other)
+    }
+
+    #[inline]
+    pub(crate) fn starts_with(&self, arena: ArenaPtr, prefix: &str) -> bool {
+        if prefix.len() > self.byte_len as usize {
             return false;
         }
         self.indices(arena)
             .iter()
-            .zip(other.as_bytes().chunks(SIMD_CHUNK_BYTES))
+            .zip(prefix.as_bytes().chunks(SIMD_CHUNK_BYTES))
             .all(|(&index, expected)| {
                 let actual =
                     unsafe { core::slice::from_raw_parts(arena.chunk_ptr(index), expected.len()) };
