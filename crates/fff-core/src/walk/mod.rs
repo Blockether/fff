@@ -99,7 +99,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &IgnoreOverlay::default().compile(root),
@@ -144,7 +144,7 @@ mod tests {
             let counter = Arc::new(AtomicUsize::new(0));
             let out = walk_collect_files(
                 root,
-                true,
+                Some(crate::scm::ScmBackend::configured()),
                 false,
                 true,
                 &IgnoreOverlay::default().compile(root),
@@ -184,7 +184,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &IgnoreOverlay::default().compile(root),
@@ -214,7 +214,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            false,
+            None,
             false,
             true,
             &IgnoreOverlay::default().compile(root),
@@ -251,7 +251,7 @@ mod tests {
         let overlay = IgnoreOverlay::default().compile(&root);
         let out = walk_collect_files(
             &root,
-            false,
+            None,
             true,
             true,
             &overlay,
@@ -273,7 +273,7 @@ mod tests {
 
         let out = walk_collect_files(
             &root,
-            false,
+            None,
             false,
             true,
             &overlay,
@@ -300,7 +300,7 @@ mod tests {
         let overlay = IgnoreOverlay::default().compile(root);
         let out = walk_collect_files(
             root,
-            false,
+            None,
             false,
             true,
             &overlay,
@@ -335,7 +335,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &IgnoreOverlay::default().compile(root),
@@ -396,7 +396,7 @@ mod tests {
             let counter = Arc::new(AtomicUsize::new(0));
             let out = walk_collect_files(
                 base,
-                true,
+                Some(crate::scm::ScmBackend::configured()),
                 false,
                 true,
                 &IgnoreOverlay::default().compile(base),
@@ -458,7 +458,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &IgnoreOverlay::default().compile(root),
@@ -520,7 +520,7 @@ mod tests {
             let counter = Arc::new(AtomicUsize::new(0));
             walk_collect_files(
                 &root,
-                true,
+                Some(crate::scm::ScmBackend::configured()),
                 false,
                 true,
                 &IgnoreOverlay::default().compile(&root),
@@ -566,7 +566,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             false,
             &IgnoreOverlay::default().compile(root),
@@ -605,7 +605,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &overlay,
@@ -648,7 +648,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &overlay,
@@ -701,7 +701,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &overlay,
@@ -755,7 +755,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             &base,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &overlay,
@@ -808,7 +808,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             &root.join("new"),
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &overlay,
@@ -856,7 +856,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let out = walk_collect_files(
             root,
-            true,
+            Some(crate::scm::ScmBackend::configured()),
             false,
             true,
             &overlay,

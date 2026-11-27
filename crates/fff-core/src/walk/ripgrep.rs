@@ -2,9 +2,9 @@ use crate::file_picker::FilePickerIgnoreOptions;
 use crate::ignore::{
     CompiledIgnoreOverlay, has_cache_dir_component, is_cache_dir_name, non_git_repo_overrides,
 };
+use crate::scm::{ScmBackend, is_metadata_path};
 use crate::types::FileItem;
 use crate::walk::{WalkIgnoreRules, WalkOutput};
-use crate::watch::is_git_file;
 use ignore::WalkBuilder;
 use std::collections::HashSet;
 use std::path::Path;
@@ -17,7 +17,7 @@ use std::sync::{
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_collect_files(
     base_path: &Path,
-    is_git_repo: bool,
+    backend: Option<ScmBackend>,
     follow_symlinks: bool,
     respect_ignore_files: bool,
     overlay: &CompiledIgnoreOverlay,
@@ -29,7 +29,7 @@ pub(crate) fn walk_collect_files(
     let mut walk_builder = WalkBuilder::new(base_path);
     walk_builder
         // this is a very important guard for the user opening ~/ or other root non-git dir
-        .hidden(!is_git_repo)
+        .hidden(backend.is_none())
         .git_ignore(respect_ignore_files)
         .git_exclude(respect_ignore_files)
         .git_global(respect_ignore_files)
@@ -45,7 +45,9 @@ pub(crate) fn walk_collect_files(
         }
     }
 
-    if !is_git_repo && let Some(overrides) = non_git_repo_overrides(base_path) {
+    if backend.is_none()
+        && let Some(overrides) = non_git_repo_overrides(base_path)
+    {
         walk_builder.overrides(overrides);
     }
 
@@ -58,7 +60,7 @@ pub(crate) fn walk_collect_files(
     });
 
     // Ripgrep lets .ignore re-include hidden entries in a non-Git root.
-    let ignore_rules = (!is_git_repo).then(|| WalkIgnoreRules {
+    let ignore_rules = (backend.is_none()).then(|| WalkIgnoreRules {
         inner: walk_builder.build_matchers().pop().expect("one walk root"),
     });
 
@@ -70,7 +72,10 @@ pub(crate) fn walk_collect_files(
         synced_files_count,
         &pairs,
         &dirs,
-        |rel, is_dir| !overlay.is_excluded(&base_path.join(rel), is_dir),
+        |rel, is_dir| {
+            !is_metadata_path(Path::new(rel), backend)
+                && !overlay.is_excluded(&base_path.join(rel), is_dir)
+        },
     );
 
     let mut pairs = pairs.into_inner();
@@ -153,7 +158,7 @@ fn collect_unignored(
                 } else {
                     known_files.contains(rel)
                 };
-                if known {
+                if known || is_metadata_path(Path::new(rel), None) {
                     return false;
                 }
                 let absolute_path = base_path.join(rel);
@@ -239,12 +244,6 @@ fn collect(
                 return ignore::WalkState::Continue;
             }
             if !file_type.is_file() {
-                return ignore::WalkState::Continue;
-            }
-
-            // Ignore walkers sometimes surface files inside `.git/`
-            // when the base is itself a git repo — skip them.
-            if is_git_file(path) {
                 return ignore::WalkState::Continue;
             }
 
